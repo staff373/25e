@@ -1,0 +1,42 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "STM32: Configure hal3 Debug",
+            "type": "shell",
+            "command": "cmake --preset Debug",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "STM32: Build hal3 Debug",
+            "type": "shell",
+            "command": "cmake --build --preset Debug",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": [
+                "STM32: Configure hal3 Debug"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "STM32: Flash hal3 Debug ELF",
+            "type": "shell",
+            "command": "& 'C:\\ST\\STM32CubeCLT_1.18.0\\STM32CubeProgrammer\\bin\\STM32_Programmer_CLI.exe' -c port=SWD mode=NORMAL reset=HWrst -w '${workspaceFolder}\\build\\Debug\\hal3_0.elf' -v -rst",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": [
+                "STM32: Build hal3 Debug"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}
