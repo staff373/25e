@@ -3,7 +3,7 @@
 ## Goal
 - STM32F407 HAL 竞赛版底盘工程，目标是现场调车优先的循迹/直角弯/蓝牙调参固件。
 - 当前主线是 `app_task` 多题顶层调度、四轮 duty 直控、五路灰度循迹、JY61P yaw 直角弯、UART5 蓝牙 ASCII 命令、USART2 MaixCAM 状态接入。
-- 当前对齐题目：`E题_简易自行瞄准装置.pdf` 基本要求（1），小车自动沿 100cm 正方形黑线逆时针循迹，圈数 `N=1~5` 可设定，`t <= 20s`，瞄准模块电源断开。
+- 当前对齐题目：`E题_简易自行瞄准装置.pdf` 基本要求（1），小车自动沿 100cm 正方形黑线循迹，圈数 `N=1~5` 可设定，`t <= 20s`，瞄准模块电源断开；当前固件调试配置固定只接受右转角点。
 - 非目标：不做 Flash 参数保存，不把 PC/LLM 自动调参链路放回固件，不在 ISR 里做业务决策。
 
 ## Hardware
@@ -28,7 +28,7 @@
 - 主循环顺序：`Imu_Poll` -> `Vision_Poll` -> `AppSensor_Poll` -> `Turn_Poll` -> `Track_Poll` -> `Task_Poll` -> `BT_Poll` -> `Motion_Poll`。
 - 顶层任务链：蓝牙 `TASK 1`/`TASK START` 或兼容 `TRACK START` -> `app_task` 选择 `Q1_TRACK` -> `Track_Start` -> `Task_Poll` 观察完成/停止/错误。
 - 自动比赛链：灰度读取 -> `Track_Poll` 状态机 -> PID 修正或 `Turn_Start` -> `Motion_SetDuty4`。
-- 直角弯链：角点确认 -> `Turn_Start` -> JY61P yaw 达到目标角或超时 -> `Turn_Stop` -> 恢复直行。
+- 直角弯链：第一帧右角点 -> `TURN_DELAY_MS` 延时 -> `Turn_Start(TURN_DIR_RIGHT)` -> JY61P yaw 达到目标角或超时 -> `Turn_Stop` -> 恢复直行；左角点当前被 `app_track` 忽略。
 - `Track_Start` 和 `Turn_Start` 都要求 `Imu_IsOnline()` 成立；IMU 异常时蓝牙会返回 `ERR TRACK` 或 `ERR TURN`。
 - 蓝牙链：UART5 ReceiveToIdle DMA -> `HAL_UARTEx_RxEventCallback` in `app_bt` -> 行命令队列 -> `BT_Poll` 解析执行。
 - UART 普通接收回调由 `app_bt` 托管，分发到 `Imu_HandleRxCplt` 和 `Vision_HandleRxCplt`；错误回调同样由 `app_bt` 分发恢复。
@@ -38,6 +38,7 @@
 - 多题选择、总启动/总停止、总完成/失败原因归 `app_task`；单题能力仍留在对应 app 模块里。
 - 新蓝牙命令接入 `app_bt`，再调用对应 app 模块的公开接口；不要在 HAL 回调里直接解析业务命令。
 - 题目基本要求（1）的圈数 N、已完成圈数、自动停车应归 `app_track`；蓝牙只负责 `SET/GET` 和 `TRACK START/STOP` 入口。
+- 当前固定右转策略归 `app_track`，不要在 `app_sensor`、`app_bt` 或 `main.c` 里改角点方向过滤。
 - 新硬件驱动先放入 `bsp_*`，应用策略放入 `app_*`；不要让 BSP 依赖比赛状态机。
 - 保持 `main.c` 只做初始化和固定轮询调度，不把复杂状态机塞进主循环。
 - 避免在 `Core/Src/stm32f4xx_it.c`、CubeMX 生成初始化函数、HAL 库源码中加入业务逻辑。

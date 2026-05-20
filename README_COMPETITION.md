@@ -49,7 +49,7 @@
 | `app_imu` | 输出 yaw / gyro_z / online | `Turn_Poll` / `Track_Start` / `BT_Poll` |
 | `app_vision` | USART2 轻量接收开关和最近一帧缓存 | `BT_Poll` |
 | `app_turn` | 90 度直角弯动作执行 | `Track_Poll` / `BT_Poll` |
-| `app_track` | `IDLE/LINE_FOLLOW/CORNER_DETECT/TURNING/RECOVER_LINE/FINISHED/STOPPED` 循迹跑圈状态机 | `app_task` / `BT_Poll` |
+| `app_track` | `IDLE/LINE_FOLLOW/TURN_DELAY/TURNING/RECOVER_LINE/FINISHED/STOPPED` 循迹跑圈状态机 | `app_task` / `BT_Poll` |
 | `app_task` | 多题选择、总启动/停止、总完成/失败原因 | `main.c` / `BT_Poll` |
 | `app_bt` | UART5 ASCII 命令、参数白名单、UART 回调分发 | `main.c` |
 
@@ -58,7 +58,7 @@
 1. 自动比赛链：
    `AppSensor_ReadNow -> Track_Poll -> Turn_Start(需要时) / Motion_SetDuty4`
 2. 直角弯链：
-   `灰度角点 -> CORNER_DETECT -> Turn_Start -> Imu yaw 到角度 -> Turn_Stop -> RECOVER_LINE`
+   `右角点首帧 -> TURN_DELAY -> Turn_Start(TURN_DIR_RIGHT) -> Imu yaw 到角度 -> Turn_Stop -> RECOVER_LINE`
 3. 蓝牙调车链：
    `UART5 DMA 空闲接收 -> BT_Poll -> 命令解析 -> Track/Turn/Motion/Vision 参数或动作`
 4. 多题入口链：
@@ -106,7 +106,7 @@
 | `TURN_OUT` | 直角弯外侧轮 duty | `0 ~ 100` | 大了转弯更快 |
 | `TURN_IN` | 直角弯内侧轮反转 duty | `-100 ~ 0` | 越负越利索，越像原地转 |
 | `TURN_ANGLE` | yaw 停止角度 | `45 ~ 180` | 大了更容易转过头，小了更容易转不够 |
-| `CORNER_MS` | 角点确认时间 | `0 ~ uint32 最大毫秒值` | 大了抗误判，小了更容易触发转弯 |
+| `TURN_DELAY_MS` | 右角点首帧后的转弯延时 | `0 ~ uint32 最大毫秒值` | 大了更晚开始转，小了更接近立即转 |
 | `RECOVER_MS` | 转弯后直行恢复时间 | `0 ~ uint32 最大毫秒值` | 大了出弯更稳，小了更快回循迹 |
 | `MAX_TURN_MS` | 转弯超时保护 | `100 ~ uint32 最大毫秒值` | 大了更宽松，小了更早保护停机 |
 | `LAPS` / `N` | 目标圈数 | `1 ~ 5` | 达到目标圈数后自动停车 |
@@ -115,12 +115,12 @@
 
 ## 比赛状态机
 
-`IDLE -> LINE_FOLLOW -> CORNER_DETECT -> TURNING -> RECOVER_LINE -> LINE_FOLLOW`
+`IDLE -> LINE_FOLLOW -> TURN_DELAY -> TURNING -> RECOVER_LINE -> LINE_FOLLOW`
 
 达到目标圈数时进入 `FINISHED` 并停车；命令停止或保护停机进入 `STOPPED`。
 
 - `LINE_FOLLOW`：灰度误差直接进 `pid_core`，输出左右轮 duty。
-- `CORNER_DETECT`：检测 `11100/11110` 或 `00111/01111` 并持续到 `CORNER_MS`。
+- `TURN_DELAY`：当前只接受右角点 `00111/01111`；第一帧读到右角点后锁存方向，等待 `TURN_DELAY_MS` 到时直接触发右转，不再要求角点持续存在。
 - `TURNING`：外侧前进、内侧反转，JY61P yaw 达到 `TURN_ANGLE` 或超时 `MAX_TURN_MS` 结束。
 - `RECOVER_LINE`：转完后按 `BASE` 直行 `RECOVER_MS`，再恢复循迹。
 - `FINISHED`：已完成 `LAPS` 圈，电机保持停止，保留圈数/角点/耗时状态。
@@ -157,5 +157,5 @@ build/Debug/hal3_0.elf
 2. 用 `MOTOR` 单独确认四轮正反和左右对应关系。
 3. 用 `TASK?` 确认顶层任务处于 `SELECTED` / `Q1_TRACK`。
 4. 用 `TURN L` / `TURN R` 单独把 `TURN_OUT`、`TURN_IN`、`TURN_ANGLE`、`MAX_TURN_MS` 调稳。
-5. 再开 `TASK START` 或兼容 `TRACK START`，只调 `BASE`、`KP`、`KD`、`CORNER_MS`、`RECOVER_MS`。
+5. 再开 `TASK START` 或兼容 `TRACK START`，只调 `BASE`、`KP`、`KD`、`TURN_DELAY_MS`、`RECOVER_MS`。
 6. 现场优先保证直角弯成功率，再压缩速度。

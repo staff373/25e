@@ -10,10 +10,10 @@
 #define APP_TURN_UPDATE_PERIOD_MS  (10U)
 #define APP_TURN_DONE_DEG          (2.5f)   /* 距离目标角度还剩多少度时判定转弯完成 */
 #define APP_TURN_SLOWDOWN_DEG      (12.0f)  /* 接近目标角度多少度后开始减速 */
-#define APP_TURN_SLOW_SCALE        (0.25f)  /* 接近终点后的减速比例 */
+#define APP_TURN_SLOW_SCALE        (0.12f)  /* 接近终点后的减速比例 */
 
-#define APP_TURN_DEFAULT_OUT_DUTY  (95.0f)  /* 外侧轮前进 duty，越大转得越快 */
-#define APP_TURN_DEFAULT_IN_DUTY   (-43.0f) /* 内侧轮反转 duty，越负越像原地甩弯 */
+#define APP_TURN_DEFAULT_OUT_DUTY  (75.0f)  /* 外侧轮前进 duty，越大转得越快 */
+#define APP_TURN_DEFAULT_IN_DUTY   (-40.0f) /* 内侧轮反转 duty，越负越像原地甩弯 */
 #define APP_TURN_DEFAULT_ANGLE_DEG (88.0f)  /* JY61P yaw 目标角度，决定转多少 */
 #define APP_TURN_DEFAULT_MAX_MS    (90000U)   /* 转弯超时保护，防止 IMU/轮子异常一直转 */
 #define APP_TURN_PARAM_TIME_MS_MAX (4294967040.0f)

@@ -17,7 +17,7 @@ extern "C" {
 #include <stdint.h>
 
 #define SENSOR_CHANNEL_COUNT             (5U)
-#define SENSOR_DEFAULT_LOST_THRESHOLD    (250U)
+#define SENSOR_DEFAULT_LOST_THRESHOLD    (1250U)
 #define SENSOR_DEFAULT_MAJORITY_SAMPLES  (3U)
 
 /* 传感器引脚定义 */

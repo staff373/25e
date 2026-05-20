@@ -21,7 +21,7 @@
 2. `Vision_Poll()`：维持 USART2 接收开关。
 3. `AppSensor_Poll()`：刷新五路灰度状态。
 4. `Turn_Poll()`：若正在直角转弯，持续输出四轮 duty。
-5. `Track_Poll()`：执行第一问循迹跑圈状态机；不在转弯时负责循迹和角点确认。
+5. `Track_Poll()`：执行第一问循迹跑圈状态机；转弯阶段不再做循迹，右角点首帧后只等待延时。
 6. `Task_Poll()`：观察当前题目的完成、停止和错误状态。
 7. `BT_Poll()`：处理蓝牙命令。
 8. `Motion_Poll()`：更新编码器计数。
@@ -162,7 +162,7 @@
 
 ### `app_track`
 
-- 功能：第一问循迹跑圈状态机，负责循迹、角点确认、转弯切换、恢复直行。
+- 功能：第一问循迹跑圈状态机，负责循迹、固定右角点首帧锁存、延时右转切换、恢复直行。
 - 对外接口：
   - `Track_Init`
   - `Track_Poll`
@@ -183,7 +183,7 @@
 - 状态说明：
   - `IDLE`：初始化后未开跑
   - `LINE_FOLLOW`：正常循迹
-  - `CORNER_DETECT`：角点确认中
+  - `TURN_DELAY`：右角点首帧后的转弯延时中
   - `TURNING`：直角弯执行中
   - `RECOVER_LINE`：转弯后按基础 duty 直行恢复
   - `FINISHED`：目标圈数完成后自动停车
@@ -247,10 +247,10 @@
 
 ### 自动直角弯
 
-1. `app_sensor` 识别到左/右角点模式
-2. `app_track` 进入 `CORNER_DETECT`
-3. 角点持续达到 `CORNER_MS`
-4. `app_track` 调用 `Turn_Start`
+1. `app_sensor` 识别到右角点模式；左角点当前由 `app_track` 忽略
+2. `app_track` 进入 `TURN_DELAY`
+3. 等待 `TURN_DELAY_MS`，期间不再要求角点持续存在
+4. `app_track` 调用 `Turn_Start(TURN_DIR_RIGHT)`
 5. `app_turn` 在 `Turn_Poll` 中持续看 `Imu_GetYawDeg`
 6. 到达 `TURN_ANGLE` 或超时 `MAX_TURN_MS` 后 `Turn_Stop`
 7. `app_track` 进入 `RECOVER_LINE`
@@ -262,7 +262,7 @@
 | `BASE` | `app_track` | 循迹基础速度，直线和出弯恢复都靠它 |
 | `KP` | `app_track` | 比例修正强度，大了更积极修方向 |
 | `KD` | `app_track` | 微分阻尼强度，大了更压摆动 |
-| `CORNER_MS` | `app_track` | 角点持续多久才确认是真角点 |
+| `TURN_DELAY_MS` | `app_track` | 首帧读到右角点后延时多久再开始右转 |
 | `RECOVER_MS` | `app_track` | 转完后先直走多久，再回循迹 |
 | `TURN_OUT` | `app_turn` | 外侧轮前进速度，决定转弯快慢 |
 | `TURN_IN` | `app_turn` | 内侧轮反转强度，决定转弯利索程度 |

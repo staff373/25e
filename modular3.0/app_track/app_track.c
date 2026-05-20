@@ -11,17 +11,18 @@
 #include <string.h>
 
 #define APP_TRACK_UPDATE_PERIOD_MS   (10U)
-#define APP_TRACK_DEFAULT_BASE_DUTY  (52.0f)   /* 循迹基础速度，直线和出弯恢复都用它 */
-#define APP_TRACK_DEFAULT_KP         (1200.0f)   /* 比例修正强度，越大转向越积极 */
-#define APP_TRACK_DEFAULT_KD         (12.0f)    /* 微分阻尼强度，越大越压摆动 */
-#define APP_TRACK_DEFAULT_CORNER_MS  (100U)    /* 角点连续成立多久才真正触发转弯 */
-#define APP_TRACK_DEFAULT_RECOVER_MS (180U)    /* 转完后先直走多久，再重新回到循迹 */
+#define APP_TRACK_DEFAULT_BASE_DUTY  (33.0f)   /* 循迹基础速度，直线和出弯恢复都用它 */
+#define APP_TRACK_DEFAULT_KP         (25.0f)   /* 比例修正强度，越大转向越积极 */
+#define APP_TRACK_DEFAULT_KD         (8.0f)    /* 微分阻尼强度，越大越压摆动 */
+#define APP_TRACK_DEFAULT_TURN_DELAY_MS (140U)    /* 首帧读到右角点后，延时多久再触发转弯 */
+#define APP_TRACK_DEFAULT_RECOVER_MS (80U)    /* 转完后先直走多久，再重新回到循迹 */
 #define APP_TRACK_PARAM_GAIN_MAX     (FLT_MAX)
 #define APP_TRACK_PARAM_TIME_MS_MAX  (4294967040.0f)
 #define APP_TRACK_DEFAULT_TARGET_LAPS (1U)
 #define APP_TRACK_MIN_TARGET_LAPS     (1U)
 #define APP_TRACK_MAX_TARGET_LAPS     (5U)
 #define APP_TRACK_CORNERS_PER_LAP     (4U)
+#define APP_TRACK_DEFAULT_CORNER_DIR  (TURN_DIR_RIGHT)
 
 static PID_Handle_t g_track_pid;
 static Track_State_t g_track_state = TRACK_STATE_IDLE;
@@ -31,7 +32,7 @@ static uint32_t g_track_last_update_ms = 0U;
 static uint32_t g_track_state_enter_ms = 0U;
 static uint32_t g_track_start_ms = 0U;
 static uint32_t g_track_stop_ms = 0U;
-static uint32_t g_track_corner_start_ms = 0U;
+static uint32_t g_track_turn_delay_start_ms = 0U;
 static uint32_t g_track_recover_start_ms = 0U;
 static int8_t g_track_corner_dir = 0;
 static uint8_t g_track_target_laps = APP_TRACK_DEFAULT_TARGET_LAPS;
@@ -40,7 +41,7 @@ static uint8_t g_track_laps_done = 0U;
 static float g_track_base_duty = APP_TRACK_DEFAULT_BASE_DUTY;
 static float g_track_kp = APP_TRACK_DEFAULT_KP;
 static float g_track_kd = APP_TRACK_DEFAULT_KD;
-static uint32_t g_track_corner_ms = APP_TRACK_DEFAULT_CORNER_MS;
+static uint32_t g_track_turn_delay_ms = APP_TRACK_DEFAULT_TURN_DELAY_MS;
 static uint32_t g_track_recover_ms = APP_TRACK_DEFAULT_RECOVER_MS;
 static float g_track_last_correction = 0.0f;
 
@@ -52,6 +53,8 @@ static uint8_t Track_IsTargetComplete(void);
 static void Track_ApplyPidParams(void);
 static float Track_Clamp(float value, float min_value, float max_value);
 static void Track_ApplyFollowControl(void);
+static uint8_t Track_StartLatchedTurn(void);
+static int8_t Track_FilterCornerDirection(int8_t detected_dir);
 
 void Track_Init(void)
 {
@@ -143,7 +146,7 @@ void Track_Poll(void)
         {
             Track_EnterState(TRACK_STATE_LINE_FOLLOW);
             g_track_corner_dir = 0;
-            g_track_corner_start_ms = 0U;
+            g_track_turn_delay_start_ms = 0U;
             g_track_last_correction = 0.0f;
             PID_Core_Reset(&g_track_pid);
         }
@@ -153,57 +156,41 @@ void Track_Poll(void)
         break;
     }
 
-    if (((g_track_state == TRACK_STATE_LINE_FOLLOW) || (g_track_state == TRACK_STATE_CORNER_DETECT)) &&
+    if ((g_track_state == TRACK_STATE_LINE_FOLLOW) &&
         (AppSensor_GetStateType() == SENSOR_STATE_LOST))
     {
         Track_StopWithReason(TRACK_STATE_STOPPED, TRACK_STOP_REASON_LOST_LINE);
         return;
     }
 
-    corner_dir = AppSensor_GetCornerDirection();
+    corner_dir = Track_FilterCornerDirection(AppSensor_GetCornerDirection());
     if (g_track_state == TRACK_STATE_LINE_FOLLOW)
     {
         if (corner_dir != 0)
         {
-            Track_EnterState(TRACK_STATE_CORNER_DETECT);
+            Track_EnterState(TRACK_STATE_TURN_DELAY);
             g_track_corner_dir = corner_dir;
-            g_track_corner_start_ms = now_ms;
+            g_track_turn_delay_start_ms = now_ms;
+            if (g_track_turn_delay_ms == 0U)
+            {
+                (void)Track_StartLatchedTurn();
+                return;
+            }
         }
 
         Track_ApplyFollowControl();
         return;
     }
 
-    if (g_track_state == TRACK_STATE_CORNER_DETECT)
+    if (g_track_state == TRACK_STATE_TURN_DELAY)
     {
-        if (corner_dir == 0)
+        if ((uint32_t)(now_ms - g_track_turn_delay_start_ms) >= g_track_turn_delay_ms)
         {
-            Track_EnterState(TRACK_STATE_LINE_FOLLOW);
-            g_track_corner_dir = 0;
-            g_track_corner_start_ms = 0U;
-            Track_ApplyFollowControl();
-            return;
-        }
-
-        if (corner_dir != g_track_corner_dir)
-        {
-            g_track_corner_dir = corner_dir;
-            g_track_corner_start_ms = now_ms;
-            Track_ApplyFollowControl();
+            (void)Track_StartLatchedTurn();
             return;
         }
 
         Track_ApplyFollowControl();
-        if ((uint32_t)(now_ms - g_track_corner_start_ms) >= g_track_corner_ms)
-        {
-            if (Turn_Start(g_track_corner_dir) != 0U)
-            {
-                Track_EnterState(TRACK_STATE_TURNING);
-                return;
-            }
-
-            Track_StopWithReason(TRACK_STATE_STOPPED, TRACK_STOP_REASON_TURN_START_FAIL);
-        }
     }
 }
 
@@ -243,8 +230,8 @@ const char *Track_GetStateName(void)
         return "IDLE";
     case TRACK_STATE_LINE_FOLLOW:
         return "LINE_FOLLOW";
-    case TRACK_STATE_CORNER_DETECT:
-        return "CORNER_DETECT";
+    case TRACK_STATE_TURN_DELAY:
+        return "TURN_DELAY";
     case TRACK_STATE_TURNING:
         return "TURNING";
     case TRACK_STATE_RECOVER_LINE:
@@ -368,9 +355,9 @@ uint8_t Track_SetParam(const char *name, float value)
         return 1U;
     }
 
-    if (strcmp(name, "CORNER_MS") == 0)
+    if ((strcmp(name, "TURN_DELAY_MS") == 0) || (strcmp(name, "CORNER_MS") == 0))
     {
-        g_track_corner_ms = (uint32_t)Track_Clamp(value, 0.0f, APP_TRACK_PARAM_TIME_MS_MAX); /* 大了更稳，小了更灵敏 */
+        g_track_turn_delay_ms = (uint32_t)Track_Clamp(value, 0.0f, APP_TRACK_PARAM_TIME_MS_MAX); /* 旧名 CORNER_MS 仅作兼容 */
         return 1U;
     }
 
@@ -413,9 +400,9 @@ uint8_t Track_GetParam(const char *name, float *value)
         return 1U;
     }
 
-    if (strcmp(name, "CORNER_MS") == 0)
+    if ((strcmp(name, "TURN_DELAY_MS") == 0) || (strcmp(name, "CORNER_MS") == 0))
     {
-        *value = (float)g_track_corner_ms;
+        *value = (float)g_track_turn_delay_ms;
         return 1U;
     }
 
@@ -448,7 +435,7 @@ void Track_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
 
     (void)snprintf(buffer,
                    buffer_size,
-                   "%s TRACK state=%s laps=%u/%u corners=%u elapsed=%lu state_ms=%lu raw=0x%02X norm=%.3f stop=%s base=%.1f kp=%.1f kd=%.1f corner_ms=%lu recover_ms=%lu corr=%.1f",
+                   "%s TRACK state=%s laps=%u/%u corners=%u elapsed=%lu state_ms=%lu raw=0x%02X norm=%.3f stop=%s base=%.1f kp=%.1f kd=%.1f turn_delay_ms=%lu recover_ms=%lu corr=%.1f",
                    prefix,
                    Track_GetStateName(),
                    (unsigned int)g_track_laps_done,
@@ -462,7 +449,7 @@ void Track_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
                    g_track_base_duty,
                    g_track_kp,
                    g_track_kd,
-                   (unsigned long)g_track_corner_ms,
+                   (unsigned long)g_track_turn_delay_ms,
                    (unsigned long)g_track_recover_ms,
                    g_track_last_correction);
 }
@@ -478,7 +465,7 @@ static void Track_ResetProgress(void)
     g_track_corner_count = 0U;
     g_track_laps_done = 0U;
     g_track_corner_dir = 0;
-    g_track_corner_start_ms = 0U;
+    g_track_turn_delay_start_ms = 0U;
     g_track_recover_start_ms = 0U;
     g_track_last_correction = 0.0f;
 }
@@ -489,7 +476,7 @@ static void Track_StopWithReason(Track_State_t stop_state, Track_StopReason_t re
     Motion_Stop();
     PID_Core_Reset(&g_track_pid);
     g_track_corner_dir = 0;
-    g_track_corner_start_ms = 0U;
+    g_track_turn_delay_start_ms = 0U;
     g_track_recover_start_ms = 0U;
     g_track_last_correction = 0.0f;
     g_track_stop_reason = reason;
@@ -561,4 +548,26 @@ static void Track_ApplyFollowControl(void)
     left_duty = Track_Clamp(g_track_base_duty - correction, -100.0f, 100.0f);
     right_duty = Track_Clamp(g_track_base_duty + correction, -100.0f, 100.0f);
     Motion_SetDuty4(left_duty, right_duty, left_duty, right_duty);
+}
+
+static uint8_t Track_StartLatchedTurn(void)
+{
+    if (Turn_Start(g_track_corner_dir) != 0U)
+    {
+        Track_EnterState(TRACK_STATE_TURNING);
+        return 1U;
+    }
+
+    Track_StopWithReason(TRACK_STATE_STOPPED, TRACK_STOP_REASON_TURN_START_FAIL);
+    return 0U;
+}
+
+static int8_t Track_FilterCornerDirection(int8_t detected_dir)
+{
+    if (detected_dir == APP_TRACK_DEFAULT_CORNER_DIR)
+    {
+        return APP_TRACK_DEFAULT_CORNER_DIR;
+    }
+
+    return 0;
 }

@@ -661,7 +661,7 @@ static void BT_SendParams(void)
     float turn_out = 0.0f;
     float turn_in = 0.0f;
     float turn_angle = 0.0f;
-    float corner_ms = 0.0f;
+    float turn_delay_ms = 0.0f;
     float recover_ms = 0.0f;
     float max_turn_ms = 0.0f;
     float laps = 0.0f;
@@ -672,21 +672,21 @@ static void BT_SendParams(void)
     (void)Turn_GetParam("TURN_OUT", &turn_out);
     (void)Turn_GetParam("TURN_IN", &turn_in);
     (void)Turn_GetParam("TURN_ANGLE", &turn_angle);
-    (void)Track_GetParam("CORNER_MS", &corner_ms);
+    (void)Track_GetParam("TURN_DELAY_MS", &turn_delay_ms);
     (void)Track_GetParam("RECOVER_MS", &recover_ms);
     (void)Turn_GetParam("MAX_TURN_MS", &max_turn_ms);
     (void)Track_GetParam("LAPS", &laps);
 
     (void)snprintf(response,
                    sizeof(response),
-                   "OK BASE=%.1f KP=%.1f KD=%.1f TURN_OUT=%.1f TURN_IN=%.1f TURN_ANGLE=%.1f CORNER_MS=%.0f RECOVER_MS=%.0f MAX_TURN_MS=%.0f LAPS=%.0f",
+                   "OK BASE=%.1f KP=%.1f KD=%.1f TURN_OUT=%.1f TURN_IN=%.1f TURN_ANGLE=%.1f TURN_DELAY_MS=%.0f RECOVER_MS=%.0f MAX_TURN_MS=%.0f LAPS=%.0f",
                    base,
                    kp,
                    kd,
                    turn_out,
                    turn_in,
                    turn_angle,
-                   corner_ms,
+                   turn_delay_ms,
                    recover_ms,
                    max_turn_ms,
                    laps);
