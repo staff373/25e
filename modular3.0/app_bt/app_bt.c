@@ -1,5 +1,7 @@
 #include "app_bt.h"
 
+#include "app_aim.h"
+#include "app_gimbal.h"
 #include "app_imu.h"
 #include "app_motion.h"
 #include "app_sensor.h"
@@ -37,6 +39,9 @@ static void BT_ProcessLine(char *line);
 static char *BT_Trim(char *text);
 static uint8_t BT_IsSpace(char ch);
 static uint8_t BT_ParseFourFloats(const char *text, float *a, float *b, float *c, float *d);
+static uint8_t BT_ParseEnableValue(const char *text, uint8_t *enabled);
+static uint8_t BT_ParseLongAndFloat(const char *text, int32_t *steps, float *speed);
+static uint8_t BT_ParseTwoLongsAndFloat(const char *text, int32_t *x_steps, int32_t *y_steps, float *speed);
 static uint8_t BT_ParseNameValue(char *text, char **name, float *value);
 static void BT_WriteText(const char *text);
 static void BT_WriteLine(const char *text);
@@ -240,6 +245,8 @@ static void BT_ProcessLine(char *line)
     if (strcmp(cmd, "STOP") == 0)
     {
         Task_Stop();
+        Aim_Stop();
+        Gimbal_Stop();
         BT_WriteLine("OK STOP");
         return;
     }
@@ -283,6 +290,217 @@ static void BT_ProcessLine(char *line)
     {
         Vision_SetEnabled(0U);
         Vision_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "GIMBAL?") == 0)
+    {
+        Gimbal_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "GIMBAL ZERO") == 0)
+    {
+        Gimbal_Zero();
+        Gimbal_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strncmp(cmd, "GIMBAL EN", 9U) == 0)
+    {
+        uint8_t enabled;
+
+        if ((cmd[9] == '\0') || (BT_IsSpace(cmd[9]) == 0U) ||
+            (BT_ParseEnableValue(&cmd[9], &enabled) == 0U))
+        {
+            BT_WriteLine("ERR GIMBAL EN");
+            return;
+        }
+
+        Gimbal_SetHoldEnabled(enabled);
+        Gimbal_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "GIMBAL STOP") == 0)
+    {
+        Gimbal_Stop();
+        Gimbal_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "GIMBAL ESTOP") == 0)
+    {
+        Aim_Stop();
+        Gimbal_EStop();
+        Gimbal_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strncmp(cmd, "GIMBAL MOVE XY", 14U) == 0)
+    {
+        int32_t x_steps;
+        int32_t y_steps;
+        float speed;
+
+        if ((cmd[14] == '\0') || (BT_IsSpace(cmd[14]) == 0U) ||
+            (BT_ParseTwoLongsAndFloat(&cmd[14], &x_steps, &y_steps, &speed) == 0U))
+        {
+            BT_WriteLine("ERR GIMBAL MOVE");
+            return;
+        }
+
+        if (Gimbal_MoveRelativeSteps(x_steps, y_steps, speed) == 0U)
+        {
+            Gimbal_FormatStatus(response, sizeof(response), "ERR");
+            BT_WriteLine(response);
+            return;
+        }
+
+        Gimbal_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strncmp(cmd, "GIMBAL MOVE X", 13U) == 0)
+    {
+        int32_t steps;
+        float speed;
+
+        if ((cmd[13] == '\0') || (BT_IsSpace(cmd[13]) == 0U) ||
+            (BT_ParseLongAndFloat(&cmd[13], &steps, &speed) == 0U))
+        {
+            BT_WriteLine("ERR GIMBAL MOVE");
+            return;
+        }
+
+        if (Gimbal_MoveRelativeSteps(steps, 0, speed) == 0U)
+        {
+            Gimbal_FormatStatus(response, sizeof(response), "ERR");
+            BT_WriteLine(response);
+            return;
+        }
+
+        Gimbal_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strncmp(cmd, "GIMBAL MOVE Y", 13U) == 0)
+    {
+        int32_t steps;
+        float speed;
+
+        if ((cmd[13] == '\0') || (BT_IsSpace(cmd[13]) == 0U) ||
+            (BT_ParseLongAndFloat(&cmd[13], &steps, &speed) == 0U))
+        {
+            BT_WriteLine("ERR GIMBAL MOVE");
+            return;
+        }
+
+        if (Gimbal_MoveRelativeSteps(0, steps, speed) == 0U)
+        {
+            Gimbal_FormatStatus(response, sizeof(response), "ERR");
+            BT_WriteLine(response);
+            return;
+        }
+
+        Gimbal_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "GIMBAL CAL?") == 0)
+    {
+        float a;
+        float b;
+        float c;
+        float d;
+
+        Gimbal_GetCalibration(&a, &b, &c, &d);
+        (void)snprintf(response,
+                       sizeof(response),
+                       "OK GIMBAL CAL valid=%u a=%.5f b=%.5f c=%.5f d=%.5f",
+                       (unsigned int)Gimbal_IsCalibrated(),
+                       a,
+                       b,
+                       c,
+                       d);
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strncmp(cmd, "GIMBAL CAL SET", 14U) == 0)
+    {
+        float a;
+        float b;
+        float c;
+        float d;
+
+        if ((cmd[14] == '\0') || (BT_IsSpace(cmd[14]) == 0U) ||
+            (BT_ParseFourFloats(&cmd[14], &a, &b, &c, &d) == 0U))
+        {
+            BT_WriteLine("ERR GIMBAL CAL");
+            return;
+        }
+
+        Gimbal_SetCalibration(a, b, c, d);
+        (void)snprintf(response,
+                       sizeof(response),
+                       "OK GIMBAL CAL a=%.5f b=%.5f c=%.5f d=%.5f",
+                       a,
+                       b,
+                       c,
+                       d);
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "AIM?") == 0)
+    {
+        Aim_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "AIM ONCE") == 0)
+    {
+        if (Aim_StartOnce(0U) != 0U)
+        {
+            Aim_FormatStatus(response, sizeof(response), "OK");
+        }
+        else
+        {
+            Aim_FormatStatus(response, sizeof(response), "ERR");
+        }
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "AIM TRACK") == 0)
+    {
+        if (Aim_StartTrack() != 0U)
+        {
+            Aim_FormatStatus(response, sizeof(response), "OK");
+        }
+        else
+        {
+            Aim_FormatStatus(response, sizeof(response), "ERR");
+        }
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "AIM STOP") == 0)
+    {
+        Aim_Stop();
+        Aim_FormatStatus(response, sizeof(response), "OK");
         BT_WriteLine(response);
         return;
     }
@@ -517,6 +735,157 @@ static uint8_t BT_ParseFourFloats(const char *text, float *a, float *b, float *c
     return 1U;
 }
 
+static uint8_t BT_ParseEnableValue(const char *text, uint8_t *enabled)
+{
+    char *end;
+    unsigned long value;
+    const char *cursor;
+
+    if ((text == (const char *)0) || (enabled == (uint8_t *)0))
+    {
+        return 0U;
+    }
+
+    cursor = text;
+    while (BT_IsSpace(*cursor) != 0U)
+    {
+        cursor++;
+    }
+
+    value = strtoul(cursor, &end, 10);
+    if ((end == cursor) || (value > 1UL))
+    {
+        return 0U;
+    }
+
+    while (BT_IsSpace(*end) != 0U)
+    {
+        end++;
+    }
+    if (*end != '\0')
+    {
+        return 0U;
+    }
+
+    *enabled = (uint8_t)value;
+    return 1U;
+}
+
+static uint8_t BT_ParseLongAndFloat(const char *text, int32_t *steps, float *speed)
+{
+    char *end;
+    long step_value;
+    float speed_value;
+    const char *cursor;
+
+    if ((text == (const char *)0) || (steps == (int32_t *)0) || (speed == (float *)0))
+    {
+        return 0U;
+    }
+
+    cursor = text;
+    while (BT_IsSpace(*cursor) != 0U)
+    {
+        cursor++;
+    }
+
+    step_value = strtol(cursor, &end, 10);
+    if (end == cursor)
+    {
+        return 0U;
+    }
+    cursor = end;
+
+    while (BT_IsSpace(*cursor) != 0U)
+    {
+        cursor++;
+    }
+
+    speed_value = strtof(cursor, &end);
+    if ((end == cursor) || (speed_value != speed_value))
+    {
+        return 0U;
+    }
+
+    while (BT_IsSpace(*end) != 0U)
+    {
+        end++;
+    }
+    if (*end != '\0')
+    {
+        return 0U;
+    }
+
+    *steps = (int32_t)step_value;
+    *speed = speed_value;
+    return 1U;
+}
+
+static uint8_t BT_ParseTwoLongsAndFloat(const char *text, int32_t *x_steps, int32_t *y_steps, float *speed)
+{
+    char *end;
+    long x_value;
+    long y_value;
+    float speed_value;
+    const char *cursor;
+
+    if ((text == (const char *)0) || (x_steps == (int32_t *)0) ||
+        (y_steps == (int32_t *)0) || (speed == (float *)0))
+    {
+        return 0U;
+    }
+
+    cursor = text;
+    while (BT_IsSpace(*cursor) != 0U)
+    {
+        cursor++;
+    }
+
+    x_value = strtol(cursor, &end, 10);
+    if (end == cursor)
+    {
+        return 0U;
+    }
+    cursor = end;
+
+    while (BT_IsSpace(*cursor) != 0U)
+    {
+        cursor++;
+    }
+
+    y_value = strtol(cursor, &end, 10);
+    if (end == cursor)
+    {
+        return 0U;
+    }
+    cursor = end;
+
+    while (BT_IsSpace(*cursor) != 0U)
+    {
+        cursor++;
+    }
+
+    speed_value = strtof(cursor, &end);
+    if ((end == cursor) || (speed_value != speed_value))
+    {
+        return 0U;
+    }
+
+    while (BT_IsSpace(*end) != 0U)
+    {
+        end++;
+    }
+    if (*end != '\0')
+    {
+        return 0U;
+    }
+
+    *x_steps = (int32_t)x_value;
+    *y_steps = (int32_t)y_value;
+    *speed = speed_value;
+    return 1U;
+}
+
 static uint8_t BT_ParseNameValue(char *text, char **name, float *value)
 {
     char *cursor;
@@ -665,6 +1034,8 @@ static void BT_SendParams(void)
     float recover_ms = 0.0f;
     float max_turn_ms = 0.0f;
     float laps = 0.0f;
+    float left_trim = 0.0f;
+    float right_trim = 0.0f;
 
     (void)Track_GetParam("BASE", &base);
     (void)Track_GetParam("KP", &kp);
@@ -676,10 +1047,12 @@ static void BT_SendParams(void)
     (void)Track_GetParam("RECOVER_MS", &recover_ms);
     (void)Turn_GetParam("MAX_TURN_MS", &max_turn_ms);
     (void)Track_GetParam("LAPS", &laps);
+    (void)Track_GetParam("LEFT_TRIM", &left_trim);
+    (void)Track_GetParam("RIGHT_TRIM", &right_trim);
 
     (void)snprintf(response,
                    sizeof(response),
-                   "OK BASE=%.1f KP=%.1f KD=%.1f TURN_OUT=%.1f TURN_IN=%.1f TURN_ANGLE=%.1f TURN_DELAY_MS=%.0f RECOVER_MS=%.0f MAX_TURN_MS=%.0f LAPS=%.0f",
+                   "OK BASE=%.1f KP=%.1f KD=%.1f TURN_OUT=%.1f TURN_IN=%.1f TURN_ANGLE=%.1f TURN_DELAY_MS=%.0f RECOVER_MS=%.0f MAX_TURN_MS=%.0f LAPS=%.0f LEFT_TRIM=%.3f RIGHT_TRIM=%.3f",
                    base,
                    kp,
                    kd,
@@ -689,7 +1062,9 @@ static void BT_SendParams(void)
                    turn_delay_ms,
                    recover_ms,
                    max_turn_ms,
-                   laps);
+                   laps,
+                   left_trim,
+                   right_trim);
     BT_WriteLine(response);
 }
 

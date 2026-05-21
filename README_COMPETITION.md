@@ -14,11 +14,14 @@
   - `bsp_encoder`：四路编码器采样。
   - `bsp_sensor`：五路灰度读取。
   - `bsp_jy61p`：JY61P 串口姿态解析。
+  - `bsp_stepper`：TIM9/TIM12 双轴 STEP/DIR/EN 定步控制。
   - `pid_core`：只给循迹用的简单 PID 数学核。
   - `app_motion`：四轮 duty 直控。
   - `app_sensor`：灰度状态包装。
   - `app_imu`：JY61P yaw / gyro_z / online。
-  - `app_vision`：MaixCAM USART2 开关和最近状态。
+  - `app_vision`：MaixCAM USART2 `$V` 坐标帧接收、解析和状态查询。
+  - `app_gimbal`：二维云台相对步数、保持使能、像素到步数矩阵。
+  - `app_aim`：一次瞄准和连续跟踪策略骨架。
   - `app_turn`：90 度直角弯执行。
   - `app_track`：第一问循迹跑圈状态机。
   - `app_task`：多题顶层调度，当前默认选择第一问 `Q1_TRACK`。
@@ -31,7 +34,7 @@
 
 `main.c` 里的主循环顺序是：
 
-`Imu_Poll -> Vision_Poll -> AppSensor_Poll -> Turn_Poll -> Track_Poll -> Task_Poll -> BT_Poll -> Motion_Poll`
+`Imu_Poll -> Vision_Poll -> Gimbal_Poll -> Aim_Poll -> AppSensor_Poll -> Turn_Poll -> Track_Poll -> Task_Poll -> BT_Poll -> Motion_Poll`
 
 这样安排的目的只有一个：先更新姿态和传感器，再让 `turn` / `track` 决策，然后由 `task` 汇总题目状态，最后由蓝牙命令和底盘轮速采样补齐本轮状态。
 
@@ -43,11 +46,14 @@
 | `bsp_encoder` | 单路编码器增量和累计计数 | `Motion_Poll` |
 | `bsp_sensor` | 五路灰度原始读取、状态压缩、误差估计 | `AppSensor_ReadNow` |
 | `bsp_jy61p` | JY61P 单字节接收和姿态解析 | `Imu_Init` / `Imu_Poll` |
+| `bsp_stepper` | TIM9/TIM12 双轴步进定步输出和计步 | `Gimbal_MoveRelativeSteps` |
 | `pid_core` | 简单 PID 数学内核 | `Track_Poll` |
 | `app_motion` | 四轮 duty 直控，附带编码器采样 | `Track_Poll` / `Turn_Poll` / `BT_Poll` |
 | `app_sensor` | 灰度状态包装，输出 raw / norm / corner 方向 | `Track_Poll` / `BT_Poll` |
 | `app_imu` | 输出 yaw / gyro_z / online | `Turn_Poll` / `Track_Start` / `BT_Poll` |
-| `app_vision` | USART2 轻量接收开关和最近一帧缓存 | `BT_Poll` |
+| `app_vision` | USART2 接收 MaixCAM `$V` 坐标帧，输出 online / seq / valid / x / y / dx / dy / area / ok / bad | `BT_Poll` |
+| `app_gimbal` | 云台 X/Y 相对步数、软件零点、保持使能、像素到步数矩阵 | `app_aim` / `BT_Poll` |
+| `app_aim` | 基于视觉 `dx/dy` 的一次瞄准和连续跟踪骨架 | `BT_Poll` |
 | `app_turn` | 90 度直角弯动作执行 | `Track_Poll` / `BT_Poll` |
 | `app_track` | `IDLE/LINE_FOLLOW/TURN_DELAY/TURNING/RECOVER_LINE/FINISHED/STOPPED` 循迹跑圈状态机 | `app_task` / `BT_Poll` |
 | `app_task` | 多题选择、总启动/停止、总完成/失败原因 | `main.c` / `BT_Poll` |
@@ -63,12 +69,16 @@
    `UART5 DMA 空闲接收 -> BT_Poll -> 命令解析 -> Track/Turn/Motion/Vision 参数或动作`
 4. 多题入口链：
    `TASK 1 / TASK START -> app_task -> app_track -> Motion_SetDuty4`
+5. 瞄准云台链：
+   `Vision_GetTarget -> app_aim -> app_gimbal -> bsp_stepper -> TIM9/TIM12 STEP`
 
 ## UART / 硬件映射
 
 - `UART5`：蓝牙，115200，`BT_TX` / `BT_RX`。
 - `USART3`：JY61P，保留 yaw / gyro_z / online。
-- `USART2`：MaixCAM / 视觉，`VISION_TX` / `VISION_RX`，支持收发开关和状态查询。
+- `USART2`：MaixCAM / 视觉，`VISION_TX` / `VISION_RX`，支持收发开关、`$V` 坐标协议解析和状态查询。
+- MaixCAM Pro 侧脚本在 `modular3.0/maixcam_pro/`；通信接线为 MaixCAM A19/TX -> STM32 PD6/USART2_RX，反向命令可接 STM32 PD5/USART2_TX -> MaixCAM A18/RX，两板共地。
+- 步进云台：X 轴 `TIM9_CH2/PE6`、`PE15 DIR`、`PB13 EN`；Y 轴 `TIM12_CH1/PB14`、`PC13 DIR`、`PD15 EN`；EN 高电平使能。
 - 四路 PWM、方向脚、四路编码器、五路灰度均沿用 `hal2.0` 当前 CubeMX 引脚与定时器绑定。
 
 ## 蓝牙命令
@@ -80,9 +90,23 @@
 | `STATUS` | 查询当前主状态 |
 | `SENSOR?` | 查询五路灰度当前状态 |
 | `IMU?` | 查询 JY61P init / online / yaw / gyro_z |
-| `VISION?` | 查询视觉接收开关与最近一帧状态 |
+| `VISION?` | 查询视觉接收、在线、坏帧、最新坐标和最近一帧状态 |
 | `VISION ON` | 打开 USART2 接收 |
 | `VISION OFF` | 关闭 USART2 接收 |
+| `GIMBAL?` | 查询云台状态、位置、剩余步数、保持使能和标定状态 |
+| `GIMBAL ZERO` | 把当前 X/Y 软件位置清零 |
+| `GIMBAL EN 1/0` | 打开或关闭步进保持使能 |
+| `GIMBAL MOVE X <steps> <speed>` | X 轴相对移动指定步数 |
+| `GIMBAL MOVE Y <steps> <speed>` | Y 轴相对移动指定步数 |
+| `GIMBAL MOVE XY <x_steps> <y_steps> <speed>` | X/Y 双轴相对移动 |
+| `GIMBAL STOP` | 云台停止 |
+| `GIMBAL ESTOP` | 云台急停 |
+| `GIMBAL CAL?` | 查询像素到步数 2x2 标定矩阵 |
+| `GIMBAL CAL SET <a> <b> <c> <d>` | 设置 `x_steps=a*dx+b*dy`、`y_steps=c*dx+d*dy` |
+| `AIM?` | 查询瞄准状态 |
+| `AIM ONCE` | 启动一次瞄准骨架 |
+| `AIM TRACK` | 启动连续跟踪骨架 |
+| `AIM STOP` | 停止瞄准和云台 |
 | `TASK?` | 查询顶层任务状态 |
 | `TASK 1` | 选择第一问 `Q1_TRACK` |
 | `TASK START` | 启动当前选择的题目 |
@@ -159,3 +183,4 @@ build/Debug/hal3_0.elf
 4. 用 `TURN L` / `TURN R` 单独把 `TURN_OUT`、`TURN_IN`、`TURN_ANGLE`、`MAX_TURN_MS` 调稳。
 5. 再开 `TASK START` 或兼容 `TRACK START`，只调 `BASE`、`KP`、`KD`、`TURN_DELAY_MS`、`RECOVER_MS`。
 6. 现场优先保证直角弯成功率，再压缩速度。
+7. 云台未确认机械限位前，只用 `GIMBAL MOVE X 20 200`、`GIMBAL MOVE Y 20 200` 这类低速小步数烟测。

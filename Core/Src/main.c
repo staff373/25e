@@ -29,6 +29,8 @@
 #include "app_sensor.h"
 #include "app_imu.h"
 #include "app_vision.h"
+#include "app_gimbal.h"
+#include "app_aim.h"
 #include "app_bt.h"
 #include "app_track.h"
 #include "app_turn.h"
@@ -115,6 +117,8 @@ int main(void)
   AppSensor_Init();
   Imu_Init();
   Vision_Init();
+  Gimbal_Init();
+  Aim_Init();
   Turn_Init();
   Track_Init();
   Task_Init();
@@ -131,6 +135,8 @@ int main(void)
     /* USER CODE BEGIN 3 */
     Imu_Poll();
     Vision_Poll();
+    Gimbal_Poll();
+    Aim_Poll();
     AppSensor_Poll();
     Turn_Poll();
     Track_Poll();

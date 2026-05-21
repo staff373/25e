@@ -10,21 +10,25 @@
 2. `AppSensor_Init()`
 3. `Imu_Init()`
 4. `Vision_Init()`
-5. `Turn_Init()`
-6. `Track_Init()`
-7. `Task_Init()`
-8. `BT_Init()`
+5. `Gimbal_Init()`
+6. `Aim_Init()`
+7. `Turn_Init()`
+8. `Track_Init()`
+9. `Task_Init()`
+10. `BT_Init()`
 
 ### 运行时主线
 
 1. `Imu_Poll()`：刷新 JY61P 解析缓存。
-2. `Vision_Poll()`：维持 USART2 接收开关。
-3. `AppSensor_Poll()`：刷新五路灰度状态。
-4. `Turn_Poll()`：若正在直角转弯，持续输出四轮 duty。
-5. `Track_Poll()`：执行第一问循迹跑圈状态机；转弯阶段不再做循迹，右角点首帧后只等待延时。
-6. `Task_Poll()`：观察当前题目的完成、停止和错误状态。
-7. `BT_Poll()`：处理蓝牙命令。
-8. `Motion_Poll()`：更新编码器计数。
+2. `Vision_Poll()`：维持 USART2 接收开关，并解析 MaixCAM `$V` 坐标帧。
+3. `Gimbal_Poll()`：刷新二维云台忙闲状态。
+4. `Aim_Poll()`：执行一次瞄准或连续跟踪骨架。
+5. `AppSensor_Poll()`：刷新五路灰度状态。
+6. `Turn_Poll()`：若正在直角转弯，持续输出四轮 duty。
+7. `Track_Poll()`：执行第一问循迹跑圈状态机；转弯阶段不再做循迹，右角点首帧后只等待延时。
+8. `Task_Poll()`：观察当前题目的完成、停止和错误状态。
+9. `BT_Poll()`：处理蓝牙命令。
+10. `Motion_Poll()`：更新编码器计数。
 
 ## 2. 模块基础功能
 
@@ -67,6 +71,21 @@
   - `BSP_JY61P_HandleRxCplt`
   - `BSP_JY61P_HandleUartError`
 - 调用者：`app_imu`
+
+### `bsp_stepper`
+
+- 功能：双轴 STEP/DIR/EN 步进驱动，按 PWM 周期精确计步，支持相对步数、剩余步数、保持使能、停止和急停。
+- 当前绑定：
+  - X：`TIM9_CH2/PE6`，`PE15 DIR`，`PB13 EN`
+  - Y：`TIM12_CH1/PB14`，`PC13 DIR`，`PD15 EN`
+- 关键接口：
+  - `BSP_Stepper_MoveSteps`
+  - `BSP_Stepper_Stop`
+  - `BSP_Stepper_EmergencyStop`
+  - `BSP_Stepper_SetHoldEnabled`
+  - `BSP_Stepper_GetPosition`
+  - `BSP_Stepper_GetRemaining`
+- 调用者：`app_gimbal`
 
 ### `pid_core`
 
@@ -130,7 +149,7 @@
 
 ### `app_vision`
 
-- 功能：保留 USART2 MaixCAM 接收开关，缓存最近一帧文本和最近收包时间。
+- 功能：保留 USART2 MaixCAM 接收开关，使用 128 字节行缓冲接收并解析 `$V,<seq>,<valid>,<x>,<y>,<dx>,<dy>,<area>*<cs>` 坐标帧，维护在线、新鲜度、有效目标和坏帧计数。
 - 对外接口：
   - `Vision_Init`
   - `Vision_Poll`
@@ -139,9 +158,51 @@
   - `Vision_SetEnabled`
   - `Vision_IsEnabled`
   - `Vision_IsOnline`
+  - `Vision_GetTarget`
+  - `Vision_GetState`
+  - `Vision_GetStateName`
   - `Vision_FormatStatus`
 - 主要调用者：
   - `app_bt`
+  - `app_aim`
+
+### `app_gimbal`
+
+- 功能：二维云台应用层，封装 X/Y 相对步数移动、保持使能、软件零点、像素误差到步数的 2x2 标定矩阵。
+- 对外接口：
+  - `Gimbal_Init`
+  - `Gimbal_Poll`
+  - `Gimbal_MoveRelativeSteps`
+  - `Gimbal_MoveByPixelError`
+  - `Gimbal_Zero`
+  - `Gimbal_Stop`
+  - `Gimbal_EStop`
+  - `Gimbal_SetCalibration`
+  - `Gimbal_FormatStatus`
+- 主要调用者：
+  - `app_aim`
+  - `app_bt`
+
+### `app_aim`
+
+- 功能：瞄准策略骨架，消费 `Vision_GetTarget`，通过 `app_gimbal` 执行一次瞄准或连续跟踪；画圆等发挥题策略后续继续放在这里。
+- 对外接口：
+  - `Aim_Init`
+  - `Aim_Poll`
+  - `Aim_StartOnce`
+  - `Aim_StartTrack`
+  - `Aim_Stop`
+  - `Aim_FormatStatus`
+- 主要调用者：
+  - `app_bt`
+
+### `maixcam_pro`
+
+- 功能：MaixCAM Pro 侧脚本模块，不参与 STM32 固件构建。
+- 文件：
+  - `README.md`：A19/A18 接线、协议和烟测方法。
+  - `stm32_uart_smoke.py`：参考 MaixPy 官方 UART 例程，使用 `/dev/ttyS1` 每 100ms 发送 `$V` 测试帧。
+- 烟测入口：MaixCAM 运行脚本后，STM32 蓝牙发送 `VISION?` 查看 `online`、`rx`、`ok`、`seq`、`dx`。
 
 ### `app_turn`
 
@@ -234,6 +295,21 @@
 1. 蓝牙发送：`MOTOR 30 30 30 30`
 2. `app_bt` 解析后调用 `Motion_SetDuty4`
 3. `app_motion` 直接下发到 `bsp_dcmotor`
+
+### 云台定步烟测
+
+1. 蓝牙发送：`GIMBAL?`
+2. 蓝牙发送：`GIMBAL EN 1`
+3. 低速小步数测试：`GIMBAL MOVE X 20 200`、`GIMBAL MOVE Y 20 200`
+4. 用 `GIMBAL?` 查看 `x_pos/y_pos` 和 `x_rem/y_rem`
+5. 异常时发送：`GIMBAL ESTOP`
+
+### 视觉瞄准骨架
+
+1. MaixCAM 发送 `$V` 坐标帧，`app_vision` 更新 `dx/dy`
+2. 蓝牙用 `GIMBAL CAL SET a b c d` 写入像素到步数矩阵
+3. `AIM ONCE` 调用 `Aim_StartOnce`，误差超阈值时经 `Gimbal_MoveByPixelError` 发一段定步运动
+4. `AIM TRACK` 每约 50ms 在云台空闲时按最新像素误差发一小段定步运动
 
 ### 自动循迹
 

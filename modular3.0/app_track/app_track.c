@@ -12,11 +12,14 @@
 
 #define APP_TRACK_UPDATE_PERIOD_MS   (10U)
 #define APP_TRACK_DEFAULT_BASE_DUTY  (33.0f)   /* 循迹基础速度，直线和出弯恢复都用它 */
-#define APP_TRACK_DEFAULT_KP         (25.0f)   /* 比例修正强度，越大转向越积极 */
+#define APP_TRACK_DEFAULT_KP         (60.0f)   /* 比例修正强度，越大转向越积极 */
 #define APP_TRACK_DEFAULT_KD         (8.0f)    /* 微分阻尼强度，越大越压摆动 */
-#define APP_TRACK_DEFAULT_TURN_DELAY_MS (140U)    /* 首帧读到右角点后，延时多久再触发转弯 */
-#define APP_TRACK_DEFAULT_RECOVER_MS (80U)    /* 转完后先直走多久，再重新回到循迹 */
+#define APP_TRACK_DEFAULT_TURN_DELAY_MS (220U)    /* 首帧读到右角点后，延时多久再触发转弯 */
+#define APP_TRACK_DEFAULT_RECOVER_MS (0U)    /* 转完后先直走多久，再重新回到循迹 */
+#define APP_TRACK_DEFAULT_LEFT_TRIM  (0.89f)  /* 机械右偏补偿：左侧轮按实测比例降速 */
+#define APP_TRACK_DEFAULT_RIGHT_TRIM (1.00f)
 #define APP_TRACK_PARAM_GAIN_MAX     (FLT_MAX)
+#define APP_TRACK_PARAM_TRIM_MAX     (1.50f)
 #define APP_TRACK_PARAM_TIME_MS_MAX  (4294967040.0f)
 #define APP_TRACK_DEFAULT_TARGET_LAPS (1U)
 #define APP_TRACK_MIN_TARGET_LAPS     (1U)
@@ -43,6 +46,8 @@ static float g_track_kp = APP_TRACK_DEFAULT_KP;
 static float g_track_kd = APP_TRACK_DEFAULT_KD;
 static uint32_t g_track_turn_delay_ms = APP_TRACK_DEFAULT_TURN_DELAY_MS;
 static uint32_t g_track_recover_ms = APP_TRACK_DEFAULT_RECOVER_MS;
+static float g_track_left_trim = APP_TRACK_DEFAULT_LEFT_TRIM;
+static float g_track_right_trim = APP_TRACK_DEFAULT_RIGHT_TRIM;
 static float g_track_last_correction = 0.0f;
 
 static void Track_EnterState(Track_State_t next);
@@ -53,6 +58,7 @@ static uint8_t Track_IsTargetComplete(void);
 static void Track_ApplyPidParams(void);
 static float Track_Clamp(float value, float min_value, float max_value);
 static void Track_ApplyFollowControl(void);
+static void Track_SetAutoDuty(float left_duty, float right_duty);
 static uint8_t Track_StartLatchedTurn(void);
 static int8_t Track_FilterCornerDirection(int8_t detected_dir);
 
@@ -131,17 +137,11 @@ void Track_Poll(void)
         Track_EnterState(TRACK_STATE_RECOVER_LINE);
         g_track_recover_start_ms = now_ms;
         PID_Core_Reset(&g_track_pid);
-        Motion_SetDuty4(g_track_base_duty,
-                        g_track_base_duty,
-                        g_track_base_duty,
-                        g_track_base_duty);
+        Track_SetAutoDuty(g_track_base_duty, g_track_base_duty);
         return;
 
     case TRACK_STATE_RECOVER_LINE:
-        Motion_SetDuty4(g_track_base_duty,
-                        g_track_base_duty,
-                        g_track_base_duty,
-                        g_track_base_duty);
+        Track_SetAutoDuty(g_track_base_duty, g_track_base_duty);
         if ((uint32_t)(now_ms - g_track_recover_start_ms) >= g_track_recover_ms)
         {
             Track_EnterState(TRACK_STATE_LINE_FOLLOW);
@@ -190,7 +190,7 @@ void Track_Poll(void)
             return;
         }
 
-        Track_ApplyFollowControl();
+        Track_SetAutoDuty(g_track_base_duty, g_track_base_duty);
     }
 }
 
@@ -372,6 +372,18 @@ uint8_t Track_SetParam(const char *name, float value)
         return Track_SetTargetLaps((uint8_t)Track_Clamp(value, APP_TRACK_MIN_TARGET_LAPS, APP_TRACK_MAX_TARGET_LAPS));
     }
 
+    if ((strcmp(name, "LEFT_TRIM") == 0) || (strcmp(name, "L_TRIM") == 0))
+    {
+        g_track_left_trim = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_TRIM_MAX);
+        return 1U;
+    }
+
+    if ((strcmp(name, "RIGHT_TRIM") == 0) || (strcmp(name, "R_TRIM") == 0))
+    {
+        g_track_right_trim = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_TRIM_MAX);
+        return 1U;
+    }
+
     return 0U;
 }
 
@@ -418,6 +430,18 @@ uint8_t Track_GetParam(const char *name, float *value)
         return 1U;
     }
 
+    if ((strcmp(name, "LEFT_TRIM") == 0) || (strcmp(name, "L_TRIM") == 0))
+    {
+        *value = g_track_left_trim;
+        return 1U;
+    }
+
+    if ((strcmp(name, "RIGHT_TRIM") == 0) || (strcmp(name, "R_TRIM") == 0))
+    {
+        *value = g_track_right_trim;
+        return 1U;
+    }
+
     return 0U;
 }
 
@@ -435,7 +459,7 @@ void Track_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
 
     (void)snprintf(buffer,
                    buffer_size,
-                   "%s TRACK state=%s laps=%u/%u corners=%u elapsed=%lu state_ms=%lu raw=0x%02X norm=%.3f stop=%s base=%.1f kp=%.1f kd=%.1f turn_delay_ms=%lu recover_ms=%lu corr=%.1f",
+                   "%s TRACK state=%s laps=%u/%u corners=%u elapsed=%lu state_ms=%lu raw=0x%02X norm=%.3f stop=%s base=%.1f kp=%.1f kd=%.1f turn_delay_ms=%lu recover_ms=%lu trim=%.3f/%.3f corr=%.1f",
                    prefix,
                    Track_GetStateName(),
                    (unsigned int)g_track_laps_done,
@@ -451,6 +475,8 @@ void Track_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
                    g_track_kd,
                    (unsigned long)g_track_turn_delay_ms,
                    (unsigned long)g_track_recover_ms,
+                   g_track_left_trim,
+                   g_track_right_trim,
                    g_track_last_correction);
 }
 
@@ -547,7 +573,17 @@ static void Track_ApplyFollowControl(void)
 
     left_duty = Track_Clamp(g_track_base_duty - correction, -100.0f, 100.0f);
     right_duty = Track_Clamp(g_track_base_duty + correction, -100.0f, 100.0f);
-    Motion_SetDuty4(left_duty, right_duty, left_duty, right_duty);
+    Track_SetAutoDuty(left_duty, right_duty);
+}
+
+static void Track_SetAutoDuty(float left_duty, float right_duty)
+{
+    float trimmed_left;
+    float trimmed_right;
+
+    trimmed_left = Track_Clamp(left_duty * g_track_left_trim, -100.0f, 100.0f);
+    trimmed_right = Track_Clamp(right_duty * g_track_right_trim, -100.0f, 100.0f);
+    Motion_SetDuty4(trimmed_left, trimmed_right, trimmed_left, trimmed_right);
 }
 
 static uint8_t Track_StartLatchedTurn(void)
