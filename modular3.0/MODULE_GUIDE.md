@@ -223,7 +223,7 @@
 
 ### `app_track`
 
-- 功能：第一问循迹跑圈状态机，负责循迹、固定右角点首帧锁存、延时右转切换、恢复直行。
+- 功能：第一问循迹跑圈状态机，负责循迹、直线段 JY61P yaw 弱航向保持、固定右角点首帧锁存、延时右转切换、恢复直行。
 - 对外接口：
   - `Track_Init`
   - `Track_Poll`
@@ -243,7 +243,7 @@
   - `Track_FormatStatus`
 - 状态说明：
   - `IDLE`：初始化后未开跑
-  - `LINE_FOLLOW`：正常循迹
+  - `LINE_FOLLOW`：正常循迹，灰度 PID 为主，JY61P yaw 航向保持为弱补偿
   - `TURN_DELAY`：右角点首帧后的转弯延时中
   - `TURNING`：直角弯执行中
   - `RECOVER_LINE`：转弯后按基础 duty 直行恢复
@@ -340,6 +340,10 @@
 | `KD` | `app_track` | 微分阻尼强度，大了更压摆动 |
 | `TURN_DELAY_MS` | `app_track` | 首帧读到右角点后延时多久再开始右转 |
 | `RECOVER_MS` | `app_track` | 转完后先直走多久，再回循迹 |
+| `HEAD_EN` | `app_track` | 直线段 JY61P yaw 航向保持开关 |
+| `HEAD_KP` | `app_track` | yaw 误差修正强度 |
+| `HEAD_KD` | `app_track` | gyro_z 阻尼强度 |
+| `HEAD_MAX` | `app_track` | 航向保持最大 duty 修正 |
 | `TURN_OUT` | `app_turn` | 外侧轮前进速度，决定转弯快慢 |
 | `TURN_IN` | `app_turn` | 内侧轮反转强度，决定转弯利索程度 |
 | `TURN_ANGLE` | `app_turn` | 目标 yaw 角度，决定转多少度停 |

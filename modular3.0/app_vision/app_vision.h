@@ -35,6 +35,14 @@ typedef struct
     uint32_t rx_total;
 } Vision_Target_t;
 
+typedef enum
+{
+    VISION_CAPTURE_STATE_IDLE = 0,
+    VISION_CAPTURE_STATE_WAIT_ACK,
+    VISION_CAPTURE_STATE_AUTO_WAIT,
+    VISION_CAPTURE_STATE_AUTO_WAIT_ACK
+} Vision_CaptureState_t;
+
 void Vision_Init(void);
 void Vision_Poll(void);
 void Vision_HandleRxCplt(UART_HandleTypeDef *huart);
@@ -46,6 +54,13 @@ uint8_t Vision_GetTarget(Vision_Target_t *target);
 Vision_State_t Vision_GetState(void);
 const char *Vision_GetStateName(void);
 void Vision_FormatStatus(char *buffer, size_t buffer_size, const char *prefix);
+uint8_t Vision_CaptureRequest(uint32_t *request_id);
+uint8_t Vision_CaptureAutoStart(uint32_t interval_ms);
+void Vision_CaptureAutoStop(void);
+uint8_t Vision_CaptureTakeNotice(char *buffer, size_t buffer_size);
+Vision_CaptureState_t Vision_CaptureGetState(void);
+const char *Vision_CaptureGetStateName(void);
+void Vision_CaptureFormatStatus(char *buffer, size_t buffer_size, const char *prefix);
 
 #ifdef __cplusplus
 }

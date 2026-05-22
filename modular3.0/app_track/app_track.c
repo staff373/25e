@@ -18,9 +18,14 @@
 #define APP_TRACK_DEFAULT_RECOVER_MS (0U)    /* 转完后先直走多久，再重新回到循迹 */
 #define APP_TRACK_DEFAULT_LEFT_TRIM  (0.89f)  /* 机械右偏补偿：左侧轮按实测比例降速 */
 #define APP_TRACK_DEFAULT_RIGHT_TRIM (1.00f)
+#define APP_TRACK_DEFAULT_HEAD_EN    (1U)
+#define APP_TRACK_DEFAULT_HEAD_KP    (0.60f)  /* yaw 走直弱修正，正值表示偏航越大修得越多 */
+#define APP_TRACK_DEFAULT_HEAD_KD    (0.00f)  /* gyro_z 阻尼，先默认关闭，现场需要时再加 */
+#define APP_TRACK_DEFAULT_HEAD_MAX   (8.0f)   /* yaw 修正最大 duty，避免抢灰度循迹主控制 */
 #define APP_TRACK_PARAM_GAIN_MAX     (FLT_MAX)
 #define APP_TRACK_PARAM_TRIM_MAX     (1.50f)
 #define APP_TRACK_PARAM_TIME_MS_MAX  (4294967040.0f)
+#define APP_TRACK_PARAM_HEAD_MAX_MAX (50.0f)
 #define APP_TRACK_DEFAULT_TARGET_LAPS (1U)
 #define APP_TRACK_MIN_TARGET_LAPS     (1U)
 #define APP_TRACK_MAX_TARGET_LAPS     (5U)
@@ -49,6 +54,15 @@ static uint32_t g_track_recover_ms = APP_TRACK_DEFAULT_RECOVER_MS;
 static float g_track_left_trim = APP_TRACK_DEFAULT_LEFT_TRIM;
 static float g_track_right_trim = APP_TRACK_DEFAULT_RIGHT_TRIM;
 static float g_track_last_correction = 0.0f;
+static float g_track_last_line_correction = 0.0f;
+static uint8_t g_track_heading_enabled = APP_TRACK_DEFAULT_HEAD_EN;
+static uint8_t g_track_heading_ref_valid = 0U;
+static float g_track_heading_ref_deg = 0.0f;
+static float g_track_heading_error_deg = 0.0f;
+static float g_track_heading_correction = 0.0f;
+static float g_track_heading_kp = APP_TRACK_DEFAULT_HEAD_KP;
+static float g_track_heading_kd = APP_TRACK_DEFAULT_HEAD_KD;
+static float g_track_heading_max = APP_TRACK_DEFAULT_HEAD_MAX;
 
 static void Track_EnterState(Track_State_t next);
 static void Track_ResetProgress(void);
@@ -61,6 +75,10 @@ static void Track_ApplyFollowControl(void);
 static void Track_SetAutoDuty(float left_duty, float right_duty);
 static uint8_t Track_StartLatchedTurn(void);
 static int8_t Track_FilterCornerDirection(int8_t detected_dir);
+static void Track_LockHeadingReference(void);
+static void Track_ClearHeadingHold(void);
+static float Track_CalculateHeadingCorrection(void);
+static float Track_NormalizeAngle180(float angle_deg);
 
 void Track_Init(void)
 {
@@ -148,6 +166,7 @@ void Track_Poll(void)
             g_track_corner_dir = 0;
             g_track_turn_delay_start_ms = 0U;
             g_track_last_correction = 0.0f;
+            g_track_last_line_correction = 0.0f;
             PID_Core_Reset(&g_track_pid);
         }
         return;
@@ -384,6 +403,41 @@ uint8_t Track_SetParam(const char *name, float value)
         return 1U;
     }
 
+    if ((strcmp(name, "HEAD_EN") == 0) || (strcmp(name, "HEADING_EN") == 0))
+    {
+        g_track_heading_enabled = (uint8_t)(Track_Clamp(value, 0.0f, 1.0f) >= 0.5f);
+        if (g_track_heading_enabled == 0U)
+        {
+            Track_ClearHeadingHold();
+        }
+        else if (g_track_state == TRACK_STATE_LINE_FOLLOW)
+        {
+            Track_LockHeadingReference();
+        }
+        return 1U;
+    }
+
+    if ((strcmp(name, "HEAD_KP") == 0) || (strcmp(name, "HEADING_KP") == 0))
+    {
+        g_track_heading_kp = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_GAIN_MAX);
+        return 1U;
+    }
+
+    if ((strcmp(name, "HEAD_KD") == 0) || (strcmp(name, "HEADING_KD") == 0))
+    {
+        g_track_heading_kd = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_GAIN_MAX);
+        return 1U;
+    }
+
+    if ((strcmp(name, "HEAD_MAX") == 0) || (strcmp(name, "HEADING_MAX") == 0))
+    {
+        g_track_heading_max = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_HEAD_MAX_MAX);
+        g_track_heading_correction = Track_Clamp(g_track_heading_correction,
+                                                 -g_track_heading_max,
+                                                 g_track_heading_max);
+        return 1U;
+    }
+
     return 0U;
 }
 
@@ -442,6 +496,30 @@ uint8_t Track_GetParam(const char *name, float *value)
         return 1U;
     }
 
+    if ((strcmp(name, "HEAD_EN") == 0) || (strcmp(name, "HEADING_EN") == 0))
+    {
+        *value = (float)g_track_heading_enabled;
+        return 1U;
+    }
+
+    if ((strcmp(name, "HEAD_KP") == 0) || (strcmp(name, "HEADING_KP") == 0))
+    {
+        *value = g_track_heading_kp;
+        return 1U;
+    }
+
+    if ((strcmp(name, "HEAD_KD") == 0) || (strcmp(name, "HEADING_KD") == 0))
+    {
+        *value = g_track_heading_kd;
+        return 1U;
+    }
+
+    if ((strcmp(name, "HEAD_MAX") == 0) || (strcmp(name, "HEADING_MAX") == 0))
+    {
+        *value = g_track_heading_max;
+        return 1U;
+    }
+
     return 0U;
 }
 
@@ -459,7 +537,7 @@ void Track_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
 
     (void)snprintf(buffer,
                    buffer_size,
-                   "%s TRACK state=%s laps=%u/%u corners=%u elapsed=%lu state_ms=%lu raw=0x%02X norm=%.3f stop=%s base=%.1f kp=%.1f kd=%.1f turn_delay_ms=%lu recover_ms=%lu trim=%.3f/%.3f corr=%.1f",
+                   "%s TRACK state=%s laps=%u/%u corners=%u elapsed=%lu state_ms=%lu raw=0x%02X norm=%.3f stop=%s base=%.1f kp=%.1f kd=%.1f turn_delay_ms=%lu recover_ms=%lu trim=%.3f/%.3f corr=%.1f line=%.1f head=%u ref=%.1f herr=%.1f hcorr=%.1f",
                    prefix,
                    Track_GetStateName(),
                    (unsigned int)g_track_laps_done,
@@ -477,13 +555,26 @@ void Track_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
                    (unsigned long)g_track_recover_ms,
                    g_track_left_trim,
                    g_track_right_trim,
-                   g_track_last_correction);
+                   g_track_last_correction,
+                   g_track_last_line_correction,
+                   (unsigned int)g_track_heading_enabled,
+                   g_track_heading_ref_deg,
+                   g_track_heading_error_deg,
+                   g_track_heading_correction);
 }
 
 static void Track_EnterState(Track_State_t next)
 {
     g_track_state = next;
     g_track_state_enter_ms = HAL_GetTick();
+    if (next == TRACK_STATE_LINE_FOLLOW)
+    {
+        Track_LockHeadingReference();
+    }
+    else
+    {
+        Track_ClearHeadingHold();
+    }
 }
 
 static void Track_ResetProgress(void)
@@ -494,6 +585,8 @@ static void Track_ResetProgress(void)
     g_track_turn_delay_start_ms = 0U;
     g_track_recover_start_ms = 0U;
     g_track_last_correction = 0.0f;
+    g_track_last_line_correction = 0.0f;
+    Track_ClearHeadingHold();
 }
 
 static void Track_StopWithReason(Track_State_t stop_state, Track_StopReason_t reason)
@@ -505,6 +598,8 @@ static void Track_StopWithReason(Track_State_t stop_state, Track_StopReason_t re
     g_track_turn_delay_start_ms = 0U;
     g_track_recover_start_ms = 0U;
     g_track_last_correction = 0.0f;
+    g_track_last_line_correction = 0.0f;
+    Track_ClearHeadingHold();
     g_track_stop_reason = reason;
     if (g_track_start_ms != 0U)
     {
@@ -557,19 +652,25 @@ static float Track_Clamp(float value, float min_value, float max_value)
 
 static void Track_ApplyFollowControl(void)
 {
+    float line_correction;
+    float heading_correction;
     float correction;
     float left_duty;
     float right_duty;
 
     if (AppSensor_IsAllWhite() != 0U)
     {
-        correction = g_track_last_correction;
+        line_correction = g_track_last_line_correction;
     }
     else
     {
-        correction = PID_Core_Calculate(&g_track_pid, 0.0f, AppSensor_GetNormError(), 0.0f);
-        g_track_last_correction = correction;
+        line_correction = PID_Core_Calculate(&g_track_pid, 0.0f, AppSensor_GetNormError(), 0.0f);
+        g_track_last_line_correction = line_correction;
     }
+
+    heading_correction = Track_CalculateHeadingCorrection();
+    correction = Track_Clamp(line_correction + heading_correction, -100.0f, 100.0f);
+    g_track_last_correction = correction;
 
     left_duty = Track_Clamp(g_track_base_duty - correction, -100.0f, 100.0f);
     right_duty = Track_Clamp(g_track_base_duty + correction, -100.0f, 100.0f);
@@ -606,4 +707,66 @@ static int8_t Track_FilterCornerDirection(int8_t detected_dir)
     }
 
     return 0;
+}
+
+static void Track_LockHeadingReference(void)
+{
+    g_track_heading_error_deg = 0.0f;
+    g_track_heading_correction = 0.0f;
+    g_track_heading_ref_valid = 0U;
+
+    if ((g_track_heading_enabled != 0U) && (Imu_IsOnline() != 0U))
+    {
+        g_track_heading_ref_deg = Imu_GetYawDeg();
+        g_track_heading_ref_valid = 1U;
+    }
+}
+
+static void Track_ClearHeadingHold(void)
+{
+    g_track_heading_ref_valid = 0U;
+    g_track_heading_ref_deg = 0.0f;
+    g_track_heading_error_deg = 0.0f;
+    g_track_heading_correction = 0.0f;
+}
+
+static float Track_CalculateHeadingCorrection(void)
+{
+    float correction;
+
+    if ((g_track_heading_enabled == 0U) || (g_track_heading_max <= 0.0f) ||
+        (Imu_IsOnline() == 0U))
+    {
+        Track_ClearHeadingHold();
+        return 0.0f;
+    }
+
+    if (g_track_heading_ref_valid == 0U)
+    {
+        Track_LockHeadingReference();
+        return 0.0f;
+    }
+
+    g_track_heading_error_deg = Track_NormalizeAngle180(Imu_GetYawDeg() - g_track_heading_ref_deg);
+    correction = -(g_track_heading_error_deg * g_track_heading_kp) -
+                 (Imu_GetGyroZDps() * g_track_heading_kd);
+    g_track_heading_correction = Track_Clamp(correction,
+                                             -g_track_heading_max,
+                                             g_track_heading_max);
+    return g_track_heading_correction;
+}
+
+static float Track_NormalizeAngle180(float angle_deg)
+{
+    while (angle_deg > 180.0f)
+    {
+        angle_deg -= 360.0f;
+    }
+
+    while (angle_deg < -180.0f)
+    {
+        angle_deg += 360.0f;
+    }
+
+    return angle_deg;
 }

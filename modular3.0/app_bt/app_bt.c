@@ -43,8 +43,10 @@ static uint8_t BT_ParseEnableValue(const char *text, uint8_t *enabled);
 static uint8_t BT_ParseLongAndFloat(const char *text, int32_t *steps, float *speed);
 static uint8_t BT_ParseTwoLongsAndFloat(const char *text, int32_t *x_steps, int32_t *y_steps, float *speed);
 static uint8_t BT_ParseNameValue(char *text, char **name, float *value);
+static uint8_t BT_ParseUint32(const char *text, uint32_t *value);
 static void BT_WriteText(const char *text);
 static void BT_WriteLine(const char *text);
+static void BT_SendCaptureNotices(void);
 static void BT_SendStatus(void);
 static void BT_SendParams(void);
 static void BT_SendSetResult(const char *name, float value);
@@ -71,10 +73,14 @@ void BT_Poll(void)
         BT_StartRx();
     }
 
+    BT_SendCaptureNotices();
+
     while (BT_DequeueLine(line, (uint16_t)sizeof(line)) != 0U)
     {
         BT_ProcessLine(line);
     }
+
+    BT_SendCaptureNotices();
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
@@ -264,6 +270,13 @@ static void BT_ProcessLine(char *line)
         return;
     }
 
+    if (strcmp(cmd, "TRACK?") == 0)
+    {
+        Track_FormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
     if (strcmp(cmd, "IMU?") == 0)
     {
         Imu_FormatStatus(response, sizeof(response), (Imu_GetInitStatus() == 0) ? "OK" : "ERR");
@@ -291,6 +304,69 @@ static void BT_ProcessLine(char *line)
         Vision_SetEnabled(0U);
         Vision_FormatStatus(response, sizeof(response), "OK");
         BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "CAP") == 0)
+    {
+        uint32_t request_id;
+
+        if (Vision_CaptureRequest(&request_id) != 0U)
+        {
+            (void)snprintf(response,
+                           sizeof(response),
+                           "OK CAP SENT id=%lu",
+                           (unsigned long)request_id);
+            BT_WriteLine(response);
+        }
+        else
+        {
+            Vision_CaptureFormatStatus(response, sizeof(response), "ERR");
+            BT_WriteLine(response);
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "CAP?") == 0)
+    {
+        Vision_CaptureFormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strcmp(cmd, "CAP AUTO OFF") == 0)
+    {
+        Vision_CaptureAutoStop();
+        Vision_CaptureFormatStatus(response, sizeof(response), "OK");
+        BT_WriteLine(response);
+        return;
+    }
+
+    if (strncmp(cmd, "CAP AUTO", 8U) == 0)
+    {
+        uint32_t interval_ms;
+
+        if ((cmd[8] == '\0') || (BT_IsSpace(cmd[8]) == 0U) ||
+            (BT_ParseUint32(&cmd[8], &interval_ms) == 0U) ||
+            (interval_ms < 50U))
+        {
+            BT_WriteLine("ERR CAP AUTO");
+            return;
+        }
+
+        if (Vision_CaptureAutoStart(interval_ms) != 0U)
+        {
+            (void)snprintf(response,
+                           sizeof(response),
+                           "OK CAP AUTO interval=%lu",
+                           (unsigned long)interval_ms);
+            BT_WriteLine(response);
+        }
+        else
+        {
+            Vision_CaptureFormatStatus(response, sizeof(response), "ERR");
+            BT_WriteLine(response);
+        }
         return;
     }
 
@@ -939,6 +1015,48 @@ static uint8_t BT_ParseNameValue(char *text, char **name, float *value)
     return (uint8_t)(*end == '\0');
 }
 
+static uint8_t BT_ParseUint32(const char *text, uint32_t *value)
+{
+    char *end;
+    unsigned long parsed;
+    const char *cursor;
+
+    if ((text == (const char *)0) || (value == (uint32_t *)0))
+    {
+        return 0U;
+    }
+
+    cursor = text;
+    while (BT_IsSpace(*cursor) != 0U)
+    {
+        cursor++;
+    }
+
+    if (*cursor == '\0')
+    {
+        return 0U;
+    }
+
+    parsed = strtoul(cursor, &end, 10);
+    if (end == cursor)
+    {
+        return 0U;
+    }
+
+    while (BT_IsSpace(*end) != 0U)
+    {
+        end++;
+    }
+
+    if (*end != '\0')
+    {
+        return 0U;
+    }
+
+    *value = (uint32_t)parsed;
+    return 1U;
+}
+
 static uint8_t BT_ParseTaskQuestion(const char *text, uint8_t *question_id)
 {
     char *end;
@@ -997,6 +1115,16 @@ static void BT_WriteLine(const char *text)
     BT_WriteText("\r\n");
 }
 
+static void BT_SendCaptureNotices(void)
+{
+    char notice[128];
+
+    while (Vision_CaptureTakeNotice(notice, sizeof(notice)) != 0U)
+    {
+        BT_WriteLine(notice);
+    }
+}
+
 static void BT_SendStatus(void)
 {
     char response[256];
@@ -1036,6 +1164,10 @@ static void BT_SendParams(void)
     float laps = 0.0f;
     float left_trim = 0.0f;
     float right_trim = 0.0f;
+    float head_en = 0.0f;
+    float head_kp = 0.0f;
+    float head_kd = 0.0f;
+    float head_max = 0.0f;
 
     (void)Track_GetParam("BASE", &base);
     (void)Track_GetParam("KP", &kp);
@@ -1049,10 +1181,14 @@ static void BT_SendParams(void)
     (void)Track_GetParam("LAPS", &laps);
     (void)Track_GetParam("LEFT_TRIM", &left_trim);
     (void)Track_GetParam("RIGHT_TRIM", &right_trim);
+    (void)Track_GetParam("HEAD_EN", &head_en);
+    (void)Track_GetParam("HEAD_KP", &head_kp);
+    (void)Track_GetParam("HEAD_KD", &head_kd);
+    (void)Track_GetParam("HEAD_MAX", &head_max);
 
     (void)snprintf(response,
                    sizeof(response),
-                   "OK BASE=%.1f KP=%.1f KD=%.1f TURN_OUT=%.1f TURN_IN=%.1f TURN_ANGLE=%.1f TURN_DELAY_MS=%.0f RECOVER_MS=%.0f MAX_TURN_MS=%.0f LAPS=%.0f LEFT_TRIM=%.3f RIGHT_TRIM=%.3f",
+                   "OK BASE=%.1f KP=%.1f KD=%.1f TURN_OUT=%.1f TURN_IN=%.1f TURN_ANGLE=%.1f TURN_DELAY_MS=%.0f RECOVER_MS=%.0f MAX_TURN_MS=%.0f LAPS=%.0f LEFT_TRIM=%.3f RIGHT_TRIM=%.3f HEAD_EN=%.0f HEAD_KP=%.2f HEAD_KD=%.3f HEAD_MAX=%.1f",
                    base,
                    kp,
                    kd,
@@ -1064,7 +1200,11 @@ static void BT_SendParams(void)
                    max_turn_ms,
                    laps,
                    left_trim,
-                   right_trim);
+                   right_trim,
+                   head_en,
+                   head_kp,
+                   head_kd,
+                   head_max);
     BT_WriteLine(response);
 }
 

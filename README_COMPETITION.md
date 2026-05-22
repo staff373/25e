@@ -89,6 +89,7 @@
 | `STOP` | 停止循迹、停止转弯、停止电机 |
 | `STATUS` | 查询当前主状态 |
 | `SENSOR?` | 查询五路灰度当前状态 |
+| `TRACK?` | 查询循迹状态、圈数、灰度修正和 JY61P 航向保持状态 |
 | `IMU?` | 查询 JY61P init / online / yaw / gyro_z |
 | `VISION?` | 查询视觉接收、在线、坏帧、最新坐标和最近一帧状态 |
 | `VISION ON` | 打开 USART2 接收 |
@@ -134,6 +135,10 @@
 | `RECOVER_MS` | 转弯后直行恢复时间 | `0 ~ uint32 最大毫秒值` | 大了出弯更稳，小了更快回循迹 |
 | `MAX_TURN_MS` | 转弯超时保护 | `100 ~ uint32 最大毫秒值` | 大了更宽松，小了更早保护停机 |
 | `LAPS` / `N` | 目标圈数 | `1 ~ 5` | 达到目标圈数后自动停车 |
+| `HEAD_EN` | 直线段 JY61P 航向保持开关 | `0 / 1` | 调车时可先关掉，确认灰度循迹后再打开 |
+| `HEAD_KP` | yaw 误差修正强度 | `0 ~ float 最大值` | 大了更能走直，太大可能和灰度抢控制 |
+| `HEAD_KD` | gyro_z 阻尼强度 | `0 ~ float 最大值` | 默认 0，直线左右摆动时再少量增加 |
+| `HEAD_MAX` | 航向保持最大 duty 修正 | `0 ~ 50` | 建议先用 `8~12`，确保灰度仍是主控制 |
 
 参数只在运行期通过蓝牙 `SET` 生效，不做 Flash 保存。
 
@@ -143,7 +148,7 @@
 
 达到目标圈数时进入 `FINISHED` 并停车；命令停止或保护停机进入 `STOPPED`。
 
-- `LINE_FOLLOW`：灰度误差直接进 `pid_core`，输出左右轮 duty。
+- `LINE_FOLLOW`：灰度误差进 `pid_core`，再弱叠加 JY61P yaw 航向保持，输出左右轮 duty。
 - `TURN_DELAY`：当前只接受右角点 `00111/01111`；第一帧读到右角点后锁存方向，等待 `TURN_DELAY_MS` 到时直接触发右转，不再要求角点持续存在。
 - `TURNING`：外侧前进、内侧反转，JY61P yaw 达到 `TURN_ANGLE` 或超时 `MAX_TURN_MS` 结束。
 - `RECOVER_LINE`：转完后按 `BASE` 直行 `RECOVER_MS`，再恢复循迹。
@@ -181,6 +186,6 @@ build/Debug/hal3_0.elf
 2. 用 `MOTOR` 单独确认四轮正反和左右对应关系。
 3. 用 `TASK?` 确认顶层任务处于 `SELECTED` / `Q1_TRACK`。
 4. 用 `TURN L` / `TURN R` 单独把 `TURN_OUT`、`TURN_IN`、`TURN_ANGLE`、`MAX_TURN_MS` 调稳。
-5. 再开 `TASK START` 或兼容 `TRACK START`，只调 `BASE`、`KP`、`KD`、`TURN_DELAY_MS`、`RECOVER_MS`。
+5. 再开 `TASK START` 或兼容 `TRACK START`，先调 `BASE`、`KP`、`KD`、`TURN_DELAY_MS`、`RECOVER_MS`；直线仍偏时再调 `HEAD_EN`、`HEAD_KP`、`HEAD_MAX`。
 6. 现场优先保证直角弯成功率，再压缩速度。
 7. 云台未确认机械限位前，只用 `GIMBAL MOVE X 20 200`、`GIMBAL MOVE Y 20 200` 这类低速小步数烟测。

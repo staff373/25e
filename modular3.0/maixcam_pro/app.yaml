@@ -1,0 +1,19 @@
+id: yolo
+name: YOLO
+name[zh]: YOLO
+version: 1.0.1
+author: local
+desc: YOLO runtime for STM32F407.
+desc[zh]: 面向 STM32F407 的 YOLO 运行程序。
+files:
+  - app_config.py
+  - app.yaml
+  - capture_uart.py
+  - main.py
+  - README.md
+  - red_circle_yolo11_320_maixcam_int8.cvimodel
+  - red_circle_yolo11_320_maixcam.labels.txt
+  - stm32_uart_smoke.py
+  - target_yolo_uart.py
+  - target_yolo.mud
+icon: app.png
