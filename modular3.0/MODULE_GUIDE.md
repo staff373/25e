@@ -20,12 +20,12 @@
 ### 运行时主线
 
 1. `Imu_Poll()`：刷新 JY61P 解析缓存。
-2. `Vision_Poll()`：维持 USART2 接收开关，并解析 MaixCAM `$V` 坐标帧。
+2. `Vision_Poll()`：维持 USART2 接收开关，解析 MaixCAM `$V` 坐标帧，并轮询 `app_vision_tools` 的 `CAP` 调试采图状态。
 3. `Gimbal_Poll()`：刷新二维云台忙闲状态。
 4. `Aim_Poll()`：执行一次瞄准或连续跟踪骨架。
 5. `AppSensor_Poll()`：刷新五路灰度状态。
-6. `Turn_Poll()`：若正在直角转弯，持续输出四轮 duty。
-7. `Track_Poll()`：执行第一问循迹跑圈状态机；转弯阶段不再做循迹，右角点首帧后只等待延时。
+6. `Turn_Poll()`：若正在直角转弯，按剩余角度角速度曲线和 duty 斜坡持续输出四轮 duty。
+7. `Track_Poll()`：执行第一问循迹跑圈状态机；转弯阶段不再做循迹，右角点首帧后先按 `BASE/BASE` 前进 `CORNER_ADVANCE_MS`。
 8. `Task_Poll()`：观察当前题目的完成、停止和错误状态。
 9. `BT_Poll()`：处理蓝牙命令。
 10. `Motion_Poll()`：更新编码器计数。
@@ -94,7 +94,7 @@
   - `PID_Core_Init`
   - `PID_Core_Reset`
   - `PID_Core_Calculate`
-- 调用者：`app_track`
+- 调用者：`app_track` 灰度 PID 巡线。
 
 ## 3. 应用层模块
 
@@ -150,6 +150,7 @@
 ### `app_vision`
 
 - 功能：保留 USART2 MaixCAM 接收开关，使用 128 字节行缓冲接收并解析 `$V,<seq>,<valid>,<x>,<y>,<dx>,<dy>,<area>*<cs>` 坐标帧，维护在线、新鲜度、有效目标和坏帧计数。
+- 文件边界：`app_vision.c` 是正式 `$V` 目标链路；`app_vision_tools.c` 集中维护 `CAP` 采图、自动采图、`VISION STREAM` 逐帧蓝牙上报；开关在 `app_vision_config.h`。
 - 对外接口：
   - `Vision_Init`
   - `Vision_Poll`
@@ -162,6 +163,14 @@
   - `Vision_GetState`
   - `Vision_GetStateName`
   - `Vision_FormatStatus`
+- 调试工具接口在 `app_vision_tools.h`：
+  - `Vision_CaptureRequest`
+  - `Vision_CaptureAutoStart`
+  - `Vision_CaptureAutoStop`
+  - `Vision_CaptureTakeNotice`
+  - `Vision_StreamSetEnabled`
+  - `Vision_StreamTakeLine`
+  - `Vision_StreamFormatStatus`
 - 主要调用者：
   - `app_bt`
   - `app_aim`
@@ -206,7 +215,7 @@
 
 ### `app_turn`
 
-- 功能：执行固定目标角度的 90 度直角弯，外侧前进、内侧反转，靠 JY61P yaw 停止。
+- 功能：执行固定目标角度的 90 度直角弯，外侧前进、内侧反转；按剩余角度 `0/15/.../90` 度角速度限制曲线线性插值，超速时收缩 duty，并用输出斜坡降低转弯抖动。
 - 对外接口：
   - `Turn_Init`
   - `Turn_Poll`
@@ -223,7 +232,7 @@
 
 ### `app_track`
 
-- 功能：第一问循迹跑圈状态机，负责循迹、直线段 JY61P yaw 弱航向保持、固定右角点首帧锁存、延时右转切换、恢复直行。
+- 功能：第一问循迹跑圈状态机，负责灰度 PID 巡线、`CENTER_BIAS` 居中态固定纠偏、右角点触发、角点后定时前进、右转切换、恢复直行和圈数统计。JY61P 不参与巡线，只由 `app_turn` 用于转弯。
 - 对外接口：
   - `Track_Init`
   - `Track_Poll`
@@ -243,8 +252,8 @@
   - `Track_FormatStatus`
 - 状态说明：
   - `IDLE`：初始化后未开跑
-  - `LINE_FOLLOW`：正常循迹，灰度 PID 为主，JY61P yaw 航向保持为弱补偿
-  - `TURN_DELAY`：右角点首帧后的转弯延时中
+  - `LINE_FOLLOW`：正常循迹，灰度 PID + `CENTER_BIAS` 控制左右轮差速
+  - `CORNER_ADVANCE`：右角点后按 `BASE/BASE` 继续前进 `CORNER_ADVANCE_MS`
   - `TURNING`：直角弯执行中
   - `RECOVER_LINE`：转弯后按基础 duty 直行恢复
   - `FINISHED`：目标圈数完成后自动停车
@@ -280,6 +289,7 @@
 ### `app_bt`
 
 - 功能：UART5 蓝牙 ASCII 行命令入口，同时托管 UART 回调分发。
+- 文件边界：`app_bt.c` 只保留 UART5 DMA、行队列、`BT_Init/BT_Poll` 和 HAL UART 回调；`app_bt_commands.c` 负责命令解析、参数白名单和状态输出。
 - 对外接口：
   - `BT_Init`
   - `BT_Poll`
@@ -317,35 +327,37 @@
 2. `app_bt` 通过 `app_task` 选择并启动 `Q1_TRACK`
 3. `app_task` 调用 `Track_Start`
 4. `app_track` 在 `LINE_FOLLOW` 中周期调用 `AppSensor_ReadNow`
-5. 误差进入 `pid_core`
-6. 输出经 `Motion_SetDuty4` 下发到底盘
-7. 每完成 4 个有效转弯计 1 圈，达到 `LAPS` 后自动停车
+5. 灰度 `norm` 进入 `pid_core`，输出 `line` 修正，再叠加 `CENTER_BIAS`
+6. 左右轮 duty 修正经 `Motion_SetDuty4` 下发到底盘
+7. 识别右角点后进入 `CORNER_ADVANCE`，按 `BASE/BASE` 前进 `CORNER_ADVANCE_MS` 后再启动右转
+8. 每完成 4 个有效转弯计 1 圈，达到 `LAPS` 后自动停车
 
 ### 自动直角弯
 
-1. `app_sensor` 识别到右角点模式；左角点当前由 `app_track` 忽略
-2. `app_track` 进入 `TURN_DELAY`
-3. 等待 `TURN_DELAY_MS`，期间不再要求角点持续存在
-4. `app_track` 调用 `Turn_Start(TURN_DIR_RIGHT)`
-5. `app_turn` 在 `Turn_Poll` 中持续看 `Imu_GetYawDeg`
-6. 到达 `TURN_ANGLE` 或超时 `MAX_TURN_MS` 后 `Turn_Stop`
-7. `app_track` 进入 `RECOVER_LINE`
+1. `app_sensor` 识别到右角点 `00111/01111`；左角点当前由 `app_track` 忽略
+2. `app_track` 进入 `CORNER_ADVANCE`，不停车，按 `BASE/BASE` 继续直行 `CORNER_ADVANCE_MS`
+3. 时间到后调用 `Turn_Start(TURN_DIR_RIGHT)`
+4. `app_turn` 在 `Turn_Poll` 中持续看 `Imu_GetYawDeg` 和 `Imu_GetGyroZDps`
+5. 到达 `TURN_ANGLE` 附近后进入内部 `SETTLE`，按 `TURN_RAMP` 把输出降到 0；超时 `MAX_TURN_MS` 直接停车
+6. `app_track` 进入 `RECOVER_LINE`
 
 ## 5. 蓝牙白名单参数归属
 
 | 参数 | 归属模块 | 注释说明 |
 | --- | --- | --- |
 | `BASE` | `app_track` | 循迹基础速度，直线和出弯恢复都靠它 |
-| `KP` | `app_track` | 比例修正强度，大了更积极修方向 |
-| `KD` | `app_track` | 微分阻尼强度，大了更压摆动 |
-| `TURN_DELAY_MS` | `app_track` | 首帧读到右角点后延时多久再开始右转 |
+| `KP` | `app_track` | 灰度 PID 比例强度 |
+| `KD` | `app_track` | 灰度 PID 微分阻尼强度 |
+| `CENTER_BIAS` / `BIAS` | `app_track` | 居中态固定纠偏 duty，默认 0 |
+| `CORNER_ADVANCE_MS` | `app_track` | 右角点后继续直行多久再进入转弯，默认 220ms |
 | `RECOVER_MS` | `app_track` | 转完后先直走多久，再回循迹 |
-| `HEAD_EN` | `app_track` | 直线段 JY61P yaw 航向保持开关 |
-| `HEAD_KP` | `app_track` | yaw 误差修正强度 |
-| `HEAD_KD` | `app_track` | gyro_z 阻尼强度 |
-| `HEAD_MAX` | `app_track` | 航向保持最大 duty 修正 |
 | `TURN_OUT` | `app_turn` | 外侧轮前进速度，决定转弯快慢 |
 | `TURN_IN` | `app_turn` | 内侧轮反转强度，决定转弯利索程度 |
 | `TURN_ANGLE` | `app_turn` | 目标 yaw 角度，决定转多少度停 |
 | `MAX_TURN_MS` | `app_turn` | 超时保护，防止异常时一直转 |
+| `TURN_RAMP` | `app_turn` | 每 10ms 最大 duty 改变量，降低转弯输出台阶 |
+| `TURN_RATE_SCALE` | `app_turn` | `TURN_R0~TURN_R90` 角速度限制曲线整体倍率 |
+| `TURN_RATE_KP` | `app_turn` | gyro_z 超过角速度限制后的输出收缩强度 |
+| `TURN_STOP_RATE` | `app_turn` | 内部 `SETTLE` 阶段放行的 gyro_z 阈值 |
+| `TURN_R0/R15/.../R90` | `app_turn` | 剩余角度每 15 度一个最大 gyro_z 标定点，中间线性插值 |
 | `LAPS` / `N` | `app_track` | 目标圈数，范围 1~5 |

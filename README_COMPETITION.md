@@ -15,17 +15,17 @@
   - `bsp_sensor`：五路灰度读取。
   - `bsp_jy61p`：JY61P 串口姿态解析。
   - `bsp_stepper`：TIM9/TIM12 双轴 STEP/DIR/EN 定步控制。
-  - `pid_core`：只给循迹用的简单 PID 数学核。
+  - `pid_core`：简单 PID 数学核，供 `app_track` 灰度 PID 巡线使用。
   - `app_motion`：四轮 duty 直控。
   - `app_sensor`：灰度状态包装。
   - `app_imu`：JY61P yaw / gyro_z / online。
-  - `app_vision`：MaixCAM USART2 `$V` 坐标帧接收、解析和状态查询。
+  - `app_vision`：MaixCAM USART2 `$V` 坐标帧接收、解析和状态查询；`app_vision_tools.c` 集中放 `CAP` 采图和 `VISION STREAM` 调试流。
   - `app_gimbal`：二维云台相对步数、保持使能、像素到步数矩阵。
   - `app_aim`：一次瞄准和连续跟踪策略骨架。
   - `app_turn`：90 度直角弯执行。
   - `app_track`：第一问循迹跑圈状态机。
   - `app_task`：多题顶层调度，当前默认选择第一问 `Q1_TRACK`。
-  - `app_bt`：UART5 蓝牙 ASCII 命令入口。
+  - `app_bt`：UART5 蓝牙收发、行队列、回调托管；同目录 `app_bt_commands.c` 负责 ASCII 命令分发。
 - 模块接口速查：见 `modular3.0/MODULE_GUIDE.md`。
 
 ## 模块功能与调用
@@ -51,20 +51,20 @@
 | `app_motion` | 四轮 duty 直控，附带编码器采样 | `Track_Poll` / `Turn_Poll` / `BT_Poll` |
 | `app_sensor` | 灰度状态包装，输出 raw / norm / corner 方向 | `Track_Poll` / `BT_Poll` |
 | `app_imu` | 输出 yaw / gyro_z / online | `Turn_Poll` / `Track_Start` / `BT_Poll` |
-| `app_vision` | USART2 接收 MaixCAM `$V` 坐标帧，输出 online / seq / valid / x / y / dx / dy / area / ok / bad | `BT_Poll` |
+| `app_vision` | USART2 接收 MaixCAM `$V` 坐标帧，输出 online / seq / valid / x / y / dx / dy / area / ok / bad；调试采图和逐帧流集中在 `app_vision_tools.c` | `BT_Poll` |
 | `app_gimbal` | 云台 X/Y 相对步数、软件零点、保持使能、像素到步数矩阵 | `app_aim` / `BT_Poll` |
 | `app_aim` | 基于视觉 `dx/dy` 的一次瞄准和连续跟踪骨架 | `BT_Poll` |
 | `app_turn` | 90 度直角弯动作执行 | `Track_Poll` / `BT_Poll` |
-| `app_track` | `IDLE/LINE_FOLLOW/TURN_DELAY/TURNING/RECOVER_LINE/FINISHED/STOPPED` 循迹跑圈状态机 | `app_task` / `BT_Poll` |
+| `app_track` | `IDLE/LINE_FOLLOW/CORNER_ADVANCE/TURNING/RECOVER_LINE/FINISHED/STOPPED` 循迹跑圈状态机 | `app_task` / `BT_Poll` |
 | `app_task` | 多题选择、总启动/停止、总完成/失败原因 | `main.c` / `BT_Poll` |
-| `app_bt` | UART5 ASCII 命令、参数白名单、UART 回调分发 | `main.c` |
+| `app_bt` | UART5 收发和 UART 回调分发；命令解析在 `app_bt_commands.c` | `main.c` |
 
 ### 关键调用链
 
 1. 自动比赛链：
-   `AppSensor_ReadNow -> Track_Poll -> Turn_Start(需要时) / Motion_SetDuty4`
+   `AppSensor_ReadNow -> Track_Poll -> 灰度 PID + CENTER_BIAS 巡线 / 灰度角点触发 CORNER_ADVANCE -> Turn_Start -> Motion_SetDuty4`
 2. 直角弯链：
-   `右角点首帧 -> TURN_DELAY -> Turn_Start(TURN_DIR_RIGHT) -> Imu yaw 到角度 -> Turn_Stop -> RECOVER_LINE`
+   `右角点首帧 -> BASE/BASE 前进 CORNER_ADVANCE_MS -> Turn_Start(TURN_DIR_RIGHT) -> 剩余角度查角速度曲线 + duty 斜坡 -> SETTLE -> RECOVER_LINE`
 3. 蓝牙调车链：
    `UART5 DMA 空闲接收 -> BT_Poll -> 命令解析 -> Track/Turn/Motion/Vision 参数或动作`
 4. 多题入口链：
@@ -89,11 +89,12 @@
 | `STOP` | 停止循迹、停止转弯、停止电机 |
 | `STATUS` | 查询当前主状态 |
 | `SENSOR?` | 查询五路灰度当前状态 |
-| `TRACK?` | 查询循迹状态、圈数、灰度修正和 JY61P 航向保持状态 |
+| `TRACK?` | 查询循迹状态、圈数、灰度角点、PID 修正、CENTER_BIAS 和停机原因 |
 | `IMU?` | 查询 JY61P init / online / yaw / gyro_z |
 | `VISION?` | 查询视觉接收、在线、坏帧、最新坐标和最近一帧状态 |
 | `VISION ON` | 打开 USART2 接收 |
 | `VISION OFF` | 关闭 USART2 接收 |
+| `VISION STREAM ON/OFF/?` | 调试用逐帧蓝牙上报 MaixCAM `$V` 成功解析帧，默认关闭 |
 | `GIMBAL?` | 查询云台状态、位置、剩余步数、保持使能和标定状态 |
 | `GIMBAL ZERO` | 把当前 X/Y 软件位置清零 |
 | `GIMBAL EN 1/0` | 打开或关闭步进保持使能 |
@@ -114,6 +115,7 @@
 | `TASK STOP` | 停止当前题目并停车 |
 | `TASK RESET` | 清顶层任务状态，保留当前题目选择 |
 | `MOTOR lf rf lb rb` | 四轮 duty 直控 |
+| `TURN?` | 查询转弯阶段、进度、剩余角度、gyro_z、角速度限制和当前输出 |
 | `TURN L` | 原地左 90 度转弯 |
 | `TURN R` | 原地右 90 度转弯 |
 | `TRACK START` | 兼容入口，等价于选择第一问并启动 |
@@ -126,31 +128,33 @@
 | 参数 | 含义 | 当前范围 | 调参提示 |
 | --- | --- | --- | --- |
 | `BASE` | 循迹基础 duty | `0 ~ 100` | 大了平时跑更快，小了更稳 |
-| `KP` | 循迹比例强度 | `0 ~ float 最大值` | 大了修正更猛，太大容易左右抖 |
-| `KD` | 循迹微分强度 | `0 ~ float 最大值` | 大了更压摆动，太大转向会发钝 |
+| `KP` | 灰度 PID 比例强度 | `0 ~ float 最大值` | 大了偏线修正更猛，太大容易左右抖 |
+| `KD` | 灰度 PID 微分阻尼强度 | `0 ~ float 最大值` | 大了更压摆动，太大转向会发钝 |
+| `CENTER_BIAS` / `BIAS` | 居中态固定纠偏 duty | `-100 ~ 100` | 默认 0；车在 `00100` 居中态仍外偏时小幅调整 |
+| `CORNER_ADVANCE_MS` | 识别右角点后继续直行时间 | `0 ~ uint32 最大毫秒值` | 默认 220；大了更晚开始转，小了更早开始转 |
 | `TURN_OUT` | 直角弯外侧轮 duty | `0 ~ 100` | 大了转弯更快 |
 | `TURN_IN` | 直角弯内侧轮反转 duty | `-100 ~ 0` | 越负越利索，越像原地转 |
 | `TURN_ANGLE` | yaw 停止角度 | `45 ~ 180` | 大了更容易转过头，小了更容易转不够 |
-| `TURN_DELAY_MS` | 右角点首帧后的转弯延时 | `0 ~ uint32 最大毫秒值` | 大了更晚开始转，小了更接近立即转 |
 | `RECOVER_MS` | 转弯后直行恢复时间 | `0 ~ uint32 最大毫秒值` | 大了出弯更稳，小了更快回循迹 |
 | `MAX_TURN_MS` | 转弯超时保护 | `100 ~ uint32 最大毫秒值` | 大了更宽松，小了更早保护停机 |
+| `TURN_RAMP` | 转弯输出斜坡，每 10ms 最大 duty 改变量 | `0.1 ~ 100` | 小了更柔和但转弯响应慢，先用 `2~5` |
+| `TURN_RATE_SCALE` | 15 度角速度限制曲线整体倍率 | `0.20 ~ 3.00` | 小了更稳，太小可能转不够；大了更快 |
+| `TURN_RATE_KP` | 超过角速度限制后的 duty 收缩强度 | `0 ~ 0.10` | 大了更压转弯抖动，太大可能动力不足 |
+| `TURN_STOP_RATE` | `SETTLE` 阶段放行的 gyro_z 阈值 | `1 ~ 720 deg/s` | 小了等车身更稳，太小会多等到超时兜底 |
+| `TURN_R0/R15/.../R90` | 剩余角度为 0/15/.../90 度时的最大 gyro_z | `1 ~ 720 deg/s` | 每 15 度一个标定点，中间线性插值 |
 | `LAPS` / `N` | 目标圈数 | `1 ~ 5` | 达到目标圈数后自动停车 |
-| `HEAD_EN` | 直线段 JY61P 航向保持开关 | `0 / 1` | 调车时可先关掉，确认灰度循迹后再打开 |
-| `HEAD_KP` | yaw 误差修正强度 | `0 ~ float 最大值` | 大了更能走直，太大可能和灰度抢控制 |
-| `HEAD_KD` | gyro_z 阻尼强度 | `0 ~ float 最大值` | 默认 0，直线左右摆动时再少量增加 |
-| `HEAD_MAX` | 航向保持最大 duty 修正 | `0 ~ 50` | 建议先用 `8~12`，确保灰度仍是主控制 |
 
 参数只在运行期通过蓝牙 `SET` 生效，不做 Flash 保存。
 
 ## 比赛状态机
 
-`IDLE -> LINE_FOLLOW -> TURN_DELAY -> TURNING -> RECOVER_LINE -> LINE_FOLLOW`
+`IDLE -> LINE_FOLLOW -> CORNER_ADVANCE -> TURNING -> RECOVER_LINE -> LINE_FOLLOW`
 
 达到目标圈数时进入 `FINISHED` 并停车；命令停止或保护停机进入 `STOPPED`。
 
-- `LINE_FOLLOW`：灰度误差进 `pid_core`，再弱叠加 JY61P yaw 航向保持，输出左右轮 duty。
-- `TURN_DELAY`：当前只接受右角点 `00111/01111`；第一帧读到右角点后锁存方向，等待 `TURN_DELAY_MS` 到时直接触发右转，不再要求角点持续存在。
-- `TURNING`：外侧前进、内侧反转，JY61P yaw 达到 `TURN_ANGLE` 或超时 `MAX_TURN_MS` 结束。
+- `LINE_FOLLOW`：灰度误差进 `pid_core`，再叠加 `CENTER_BIAS`，输出左右轮 duty；JY61P 不参与巡线。
+- `CORNER_ADVANCE`：当前只接受右角点 `00111/01111`；触发后不停车，按 `BASE/BASE` 前进 `CORNER_ADVANCE_MS`，再调用 `Turn_Start(TURN_DIR_RIGHT)`。
+- `TURNING`：外侧前进、内侧反转；`app_turn` 按剩余角度查 `TURN_R0~TURN_R90` 角速度限制并线性插值，超速时用 `TURN_RATE_KP` 收缩输出，再用 `TURN_RAMP` 做 duty 斜坡；接近目标角后进入 `SETTLE` 把输出降到 0，最后交给 `RECOVER_LINE`。
 - `RECOVER_LINE`：转完后按 `BASE` 直行 `RECOVER_MS`，再恢复循迹。
 - `FINISHED`：已完成 `LAPS` 圈，电机保持停止，保留圈数/角点/耗时状态。
 - `STOPPED`：命令停止或保护停机。
@@ -185,7 +189,7 @@ build/Debug/hal3_0.elf
 1. 先用 `PING`、`SENSOR?`、`IMU?`、`VISION?` 确认三路串口状态。
 2. 用 `MOTOR` 单独确认四轮正反和左右对应关系。
 3. 用 `TASK?` 确认顶层任务处于 `SELECTED` / `Q1_TRACK`。
-4. 用 `TURN L` / `TURN R` 单独把 `TURN_OUT`、`TURN_IN`、`TURN_ANGLE`、`MAX_TURN_MS` 调稳。
-5. 再开 `TASK START` 或兼容 `TRACK START`，先调 `BASE`、`KP`、`KD`、`TURN_DELAY_MS`、`RECOVER_MS`；直线仍偏时再调 `HEAD_EN`、`HEAD_KP`、`HEAD_MAX`。
+4. 用 `TURN L` / `TURN R` 单独把 `TURN_OUT`、`TURN_IN`、`TURN_ANGLE`、`TURN_RAMP`、`TURN_RATE_SCALE`、`TURN_RATE_KP`、`MAX_TURN_MS` 调稳；用 `TURN?` 看 `remain/rate_lim/scale/out/in`。
+5. 再开 `TASK START` 或兼容 `TRACK START`，先调 `BASE`、`KP`、`KD`、`CENTER_BIAS`、`LEFT_TRIM`、`RIGHT_TRIM`、`CORNER_ADVANCE_MS`、`RECOVER_MS`；直线仍抖时看 `TRACK?` 里的 `raw/norm/corner/line/corr`。
 6. 现场优先保证直角弯成功率，再压缩速度。
 7. 云台未确认机械限位前，只用 `GIMBAL MOVE X 20 200`、`GIMBAL MOVE Y 20 200` 这类低速小步数烟测。

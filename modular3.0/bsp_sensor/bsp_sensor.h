@@ -109,4 +109,3 @@ uint8_t Sensor_IsLeftTurnPattern(Sensor_t *s);
 #endif
 
 #endif /* SENSOR_H */
-

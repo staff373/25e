@@ -34,12 +34,14 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     modular3.0/app_sensor/app_sensor.c
     modular3.0/app_imu/app_imu.c
     modular3.0/app_vision/app_vision.c
+    modular3.0/app_vision/app_vision_tools.c
     modular3.0/app_gimbal/app_gimbal.c
     modular3.0/app_aim/app_aim.c
     modular3.0/app_turn/app_turn.c
     modular3.0/app_track/app_track.c
     modular3.0/app_task/app_task.c
     modular3.0/app_bt/app_bt.c
+    modular3.0/app_bt/app_bt_commands.c
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE

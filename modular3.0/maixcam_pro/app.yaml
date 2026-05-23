@@ -1,7 +1,7 @@
 id: yolo
 name: YOLO
 name[zh]: YOLO
-version: 1.0.1
+version: 1.0.3
 author: local
 desc: YOLO runtime for STM32F407.
 desc[zh]: 面向 STM32F407 的 YOLO 运行程序。

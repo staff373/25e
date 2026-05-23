@@ -1,5 +1,6 @@
 #include "app_vision.h"
 
+#include "app_vision_tools.h"
 #include "usart.h"
 
 #include <stdio.h>
@@ -9,10 +10,6 @@
 #define APP_VISION_ONLINE_TIMEOUT_MS (1000U)
 #define APP_VISION_LINE_BUF_SIZE     (128U)
 #define APP_VISION_FIELD_COUNT       (7U)
-#define APP_VISION_CAPTURE_TX_TIMEOUT_MS  (10U)
-#define APP_VISION_CAPTURE_ACK_TIMEOUT_MS (2000U)
-#define APP_VISION_CAPTURE_NOTICE_SIZE    (128U)
-#define APP_VISION_CAPTURE_TOKEN_SIZE     (32U)
 
 static uint8_t g_vision_enabled = 1U;
 static uint8_t g_vision_listening = 0U;
@@ -31,41 +28,17 @@ static volatile uint8_t g_vision_line_pending = 0U;
 static char g_vision_pending_line[APP_VISION_LINE_BUF_SIZE];
 static char g_vision_last_line[APP_VISION_LINE_BUF_SIZE];
 
-static Vision_CaptureState_t g_capture_state = VISION_CAPTURE_STATE_IDLE;
-static uint32_t g_capture_next_id = 1U;
-static uint32_t g_capture_pending_id = 0U;
-static uint32_t g_capture_pending_ms = 0U;
-static uint32_t g_capture_auto_interval_ms = 0U;
-static uint32_t g_capture_last_trigger_ms = 0U;
-static uint32_t g_capture_last_id = 0U;
-static uint8_t g_capture_auto_enabled = 0U;
-static uint8_t g_capture_last_ok = 0U;
-static uint8_t g_capture_notice_pending = 0U;
-static char g_capture_last_file[APP_VISION_CAPTURE_TOKEN_SIZE] = "-";
-static char g_capture_last_error[APP_VISION_CAPTURE_TOKEN_SIZE] = "-";
-static char g_capture_notice[APP_VISION_CAPTURE_NOTICE_SIZE];
-
 static void Vision_StartReceive(void);
 static void Vision_FinalizeLine(void);
 static void Vision_ResetLineBuffers(void);
 static void Vision_ProcessPendingLine(void);
 static uint8_t Vision_ParseFrame(char *line);
-static uint8_t Vision_ParseCaptureAck(char *line);
 static uint8_t Vision_ChecksumIsValid(const char *line, char **payload_end);
 static int8_t Vision_HexNibble(char ch);
 static uint8_t Vision_ParseFields(char *payload, long fields[APP_VISION_FIELD_COUNT]);
 static uint8_t Vision_ValueInRange(long value, long min_value, long max_value);
 static uint32_t Vision_GetAgeMs(void);
 static const char *Vision_GetStatusLine(void);
-static void Vision_CaptureInit(void);
-static void Vision_CapturePoll(void);
-static uint8_t Vision_CaptureStartRequest(uint8_t auto_request, uint32_t *request_id);
-static void Vision_CaptureComplete(uint32_t request_id, uint8_t ok, const char *detail);
-static void Vision_CaptureSetNotice(uint8_t ok, uint32_t request_id, const char *detail);
-static uint8_t Vision_CaptureParseId(char **cursor, uint32_t *request_id);
-static uint8_t Vision_CaptureReadToken(char **cursor, char *token, size_t token_size);
-static void Vision_CaptureCopyToken(char *dest, size_t dest_size, const char *src);
-static uint32_t Vision_CaptureElapsedMs(void);
 
 void Vision_Init(void)
 {
@@ -79,7 +52,7 @@ void Vision_Init(void)
     g_vision_state = VISION_STATE_LISTENING;
     (void)memset(&g_vision_target, 0, sizeof(g_vision_target));
     Vision_ResetLineBuffers();
-    Vision_CaptureInit();
+    Vision_ToolsInit();
     Vision_StartReceive();
 }
 
@@ -97,7 +70,7 @@ void Vision_Poll(void)
     }
 
     Vision_ProcessPendingLine();
-    Vision_CapturePoll();
+    Vision_ToolsPoll();
 
     if ((g_vision_last_rx_ms != 0U) &&
         ((uint32_t)(HAL_GetTick() - g_vision_last_rx_ms) > APP_VISION_ONLINE_TIMEOUT_MS))
@@ -176,6 +149,7 @@ void Vision_SetEnabled(uint8_t enabled)
         g_vision_listening = 0U;
         g_vision_state = VISION_STATE_DISABLED;
         Vision_ResetLineBuffers();
+        Vision_StreamSetEnabled(0U);
         (void)HAL_UART_AbortReceive(&huart2);
         return;
     }
@@ -291,116 +265,6 @@ void Vision_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
                    line);
 }
 
-uint8_t Vision_CaptureRequest(uint32_t *request_id)
-{
-    return Vision_CaptureStartRequest(0U, request_id);
-}
-
-uint8_t Vision_CaptureAutoStart(uint32_t interval_ms)
-{
-    if ((g_capture_state == VISION_CAPTURE_STATE_WAIT_ACK) ||
-        (g_capture_state == VISION_CAPTURE_STATE_AUTO_WAIT_ACK))
-    {
-        return 0U;
-    }
-
-    if (interval_ms < 50U)
-    {
-        interval_ms = 50U;
-    }
-
-    g_capture_auto_enabled = 1U;
-    g_capture_auto_interval_ms = interval_ms;
-    g_capture_last_trigger_ms = (uint32_t)(HAL_GetTick() - interval_ms);
-    g_capture_state = VISION_CAPTURE_STATE_AUTO_WAIT;
-    return 1U;
-}
-
-void Vision_CaptureAutoStop(void)
-{
-    g_capture_auto_enabled = 0U;
-    g_capture_auto_interval_ms = 0U;
-
-    if (g_capture_state == VISION_CAPTURE_STATE_AUTO_WAIT)
-    {
-        g_capture_state = VISION_CAPTURE_STATE_IDLE;
-    }
-    else if (g_capture_state == VISION_CAPTURE_STATE_AUTO_WAIT_ACK)
-    {
-        g_capture_state = VISION_CAPTURE_STATE_WAIT_ACK;
-    }
-}
-
-uint8_t Vision_CaptureTakeNotice(char *buffer, size_t buffer_size)
-{
-    size_t length;
-
-    if ((buffer == (char *)0) || (buffer_size == 0U) || (g_capture_notice_pending == 0U))
-    {
-        return 0U;
-    }
-
-    length = strlen(g_capture_notice);
-    if (length >= buffer_size)
-    {
-        length = buffer_size - 1U;
-    }
-
-    (void)memcpy(buffer, g_capture_notice, length);
-    buffer[length] = '\0';
-    g_capture_notice_pending = 0U;
-    return 1U;
-}
-
-Vision_CaptureState_t Vision_CaptureGetState(void)
-{
-    return g_capture_state;
-}
-
-const char *Vision_CaptureGetStateName(void)
-{
-    switch (g_capture_state)
-    {
-    case VISION_CAPTURE_STATE_IDLE:
-        return "IDLE";
-    case VISION_CAPTURE_STATE_WAIT_ACK:
-        return "WAIT_ACK";
-    case VISION_CAPTURE_STATE_AUTO_WAIT:
-        return "AUTO_WAIT";
-    case VISION_CAPTURE_STATE_AUTO_WAIT_ACK:
-        return "AUTO_WAIT_ACK";
-    default:
-        return "UNKNOWN";
-    }
-}
-
-void Vision_CaptureFormatStatus(char *buffer, size_t buffer_size, const char *prefix)
-{
-    if ((buffer == (char *)0) || (buffer_size == 0U))
-    {
-        return;
-    }
-
-    if (prefix == (const char *)0)
-    {
-        prefix = "OK";
-    }
-
-    (void)snprintf(buffer,
-                   buffer_size,
-                   "%s CAP state=%s auto=%u interval=%lu pending=%lu next=%lu last_id=%lu last_ok=%u file=%s err=%s",
-                   prefix,
-                   Vision_CaptureGetStateName(),
-                   (unsigned int)g_capture_auto_enabled,
-                   (unsigned long)g_capture_auto_interval_ms,
-                   (unsigned long)g_capture_pending_id,
-                   (unsigned long)g_capture_next_id,
-                   (unsigned long)g_capture_last_id,
-                   (unsigned int)g_capture_last_ok,
-                   g_capture_last_file,
-                   g_capture_last_error);
-}
-
 static void Vision_StartReceive(void)
 {
     if (g_vision_enabled == 0U)
@@ -450,6 +314,7 @@ static void Vision_ResetLineBuffers(void)
 static void Vision_ProcessPendingLine(void)
 {
     char line[APP_VISION_LINE_BUF_SIZE];
+    char raw_line[APP_VISION_LINE_BUF_SIZE];
 
     if (g_vision_line_pending == 0U)
     {
@@ -458,11 +323,12 @@ static void Vision_ProcessPendingLine(void)
 
     __disable_irq();
     (void)memcpy(line, g_vision_pending_line, sizeof(line));
+    (void)memcpy(raw_line, g_vision_pending_line, sizeof(raw_line));
     g_vision_line_pending = 0U;
     __enable_irq();
 
     g_vision_state = VISION_STATE_LINE_PENDING;
-    if (Vision_ParseCaptureAck(line) != 0U)
+    if (Vision_ToolsTryParseLine(line) != 0U)
     {
         return;
     }
@@ -475,6 +341,7 @@ static void Vision_ProcessPendingLine(void)
         g_vision_target.rx_total = g_vision_rx_total;
         g_vision_target.age_ms = Vision_GetAgeMs();
         g_vision_state = (g_vision_target.valid != 0U) ? VISION_STATE_TARGET_VALID : VISION_STATE_NO_TARGET;
+        Vision_ToolsOnFrame(&g_vision_target, raw_line);
     }
     else
     {
@@ -531,46 +398,6 @@ static uint8_t Vision_ParseFrame(char *line)
     g_vision_target.dy = (int16_t)fields[5];
     g_vision_target.area = (uint16_t)fields[6];
     return 1U;
-}
-
-static uint8_t Vision_ParseCaptureAck(char *line)
-{
-    char *cursor;
-    uint32_t request_id;
-    char detail[APP_VISION_CAPTURE_TOKEN_SIZE];
-
-    if (line == (char *)0)
-    {
-        return 0U;
-    }
-
-    if (strncmp(line, "CAP OK ", 7U) == 0)
-    {
-        cursor = line + 7;
-        if ((Vision_CaptureParseId(&cursor, &request_id) == 0U) ||
-            (Vision_CaptureReadToken(&cursor, detail, sizeof(detail)) == 0U))
-        {
-            return 1U;
-        }
-
-        Vision_CaptureComplete(request_id, 1U, detail);
-        return 1U;
-    }
-
-    if (strncmp(line, "CAP ERR ", 8U) == 0)
-    {
-        cursor = line + 8;
-        if ((Vision_CaptureParseId(&cursor, &request_id) == 0U) ||
-            (Vision_CaptureReadToken(&cursor, detail, sizeof(detail)) == 0U))
-        {
-            return 1U;
-        }
-
-        Vision_CaptureComplete(request_id, 0U, detail);
-        return 1U;
-    }
-
-    return 0U;
 }
 
 static uint8_t Vision_ChecksumIsValid(const char *line, char **payload_end)
@@ -675,254 +502,6 @@ static uint8_t Vision_ParseFields(char *payload, long fields[APP_VISION_FIELD_CO
 static uint8_t Vision_ValueInRange(long value, long min_value, long max_value)
 {
     return (uint8_t)((value >= min_value) && (value <= max_value));
-}
-
-static void Vision_CaptureInit(void)
-{
-    g_capture_state = VISION_CAPTURE_STATE_IDLE;
-    g_capture_next_id = 1U;
-    g_capture_pending_id = 0U;
-    g_capture_pending_ms = 0U;
-    g_capture_auto_interval_ms = 0U;
-    g_capture_last_trigger_ms = 0U;
-    g_capture_last_id = 0U;
-    g_capture_auto_enabled = 0U;
-    g_capture_last_ok = 0U;
-    g_capture_notice_pending = 0U;
-    Vision_CaptureCopyToken(g_capture_last_file, sizeof(g_capture_last_file), "-");
-    Vision_CaptureCopyToken(g_capture_last_error, sizeof(g_capture_last_error), "-");
-    g_capture_notice[0] = '\0';
-}
-
-static void Vision_CapturePoll(void)
-{
-    uint32_t now = HAL_GetTick();
-    uint32_t request_id;
-
-    if ((g_capture_state == VISION_CAPTURE_STATE_WAIT_ACK) ||
-        (g_capture_state == VISION_CAPTURE_STATE_AUTO_WAIT_ACK))
-    {
-        if (Vision_CaptureElapsedMs() > APP_VISION_CAPTURE_ACK_TIMEOUT_MS)
-        {
-            Vision_CaptureComplete(g_capture_pending_id, 0U, "timeout");
-        }
-        return;
-    }
-
-    if ((g_capture_auto_enabled != 0U) &&
-        (g_capture_state == VISION_CAPTURE_STATE_AUTO_WAIT) &&
-        ((uint32_t)(now - g_capture_last_trigger_ms) >= g_capture_auto_interval_ms))
-    {
-        g_capture_last_trigger_ms = now;
-        if (Vision_CaptureStartRequest(1U, &request_id) == 0U)
-        {
-            g_capture_last_id = g_capture_next_id;
-            g_capture_last_ok = 0U;
-            Vision_CaptureCopyToken(g_capture_last_error, sizeof(g_capture_last_error), "tx_failed");
-            Vision_CaptureSetNotice(0U, g_capture_last_id, g_capture_last_error);
-        }
-    }
-}
-
-static uint8_t Vision_CaptureStartRequest(uint8_t auto_request, uint32_t *request_id)
-{
-    char command[32];
-    uint32_t id;
-    HAL_StatusTypeDef status;
-
-    if ((g_capture_state == VISION_CAPTURE_STATE_WAIT_ACK) ||
-        (g_capture_state == VISION_CAPTURE_STATE_AUTO_WAIT_ACK))
-    {
-        return 0U;
-    }
-
-    id = g_capture_next_id;
-    (void)snprintf(command, sizeof(command), "CAP %lu\n", (unsigned long)id);
-    status = HAL_UART_Transmit(&huart2,
-                               (uint8_t *)command,
-                               (uint16_t)strlen(command),
-                               APP_VISION_CAPTURE_TX_TIMEOUT_MS);
-    if (status != HAL_OK)
-    {
-        Vision_CaptureCopyToken(g_capture_last_error, sizeof(g_capture_last_error), "tx_failed");
-        return 0U;
-    }
-
-    g_capture_next_id++;
-    g_capture_pending_id = id;
-    g_capture_pending_ms = HAL_GetTick();
-    g_capture_state = ((auto_request != 0U) || (g_capture_auto_enabled != 0U)) ?
-                          VISION_CAPTURE_STATE_AUTO_WAIT_ACK :
-                          VISION_CAPTURE_STATE_WAIT_ACK;
-
-    if (request_id != (uint32_t *)0)
-    {
-        *request_id = id;
-    }
-
-    return 1U;
-}
-
-static void Vision_CaptureComplete(uint32_t request_id, uint8_t ok, const char *detail)
-{
-    if (((g_capture_state == VISION_CAPTURE_STATE_WAIT_ACK) ||
-         (g_capture_state == VISION_CAPTURE_STATE_AUTO_WAIT_ACK)) &&
-        (request_id != g_capture_pending_id))
-    {
-        Vision_CaptureCopyToken(g_capture_last_error, sizeof(g_capture_last_error), "id_mismatch");
-        Vision_CaptureSetNotice(0U, request_id, g_capture_last_error);
-        return;
-    }
-
-    g_capture_last_id = request_id;
-    g_capture_last_ok = (ok != 0U) ? 1U : 0U;
-
-    if (ok != 0U)
-    {
-        Vision_CaptureCopyToken(g_capture_last_file, sizeof(g_capture_last_file), detail);
-        Vision_CaptureCopyToken(g_capture_last_error, sizeof(g_capture_last_error), "-");
-    }
-    else
-    {
-        Vision_CaptureCopyToken(g_capture_last_error, sizeof(g_capture_last_error), detail);
-    }
-
-    g_capture_pending_id = 0U;
-    g_capture_pending_ms = 0U;
-    Vision_CaptureSetNotice(ok, request_id, detail);
-
-    if (g_capture_auto_enabled != 0U)
-    {
-        g_capture_state = VISION_CAPTURE_STATE_AUTO_WAIT;
-        g_capture_last_trigger_ms = HAL_GetTick();
-    }
-    else
-    {
-        g_capture_state = VISION_CAPTURE_STATE_IDLE;
-    }
-}
-
-static void Vision_CaptureSetNotice(uint8_t ok, uint32_t request_id, const char *detail)
-{
-    if (detail == (const char *)0)
-    {
-        detail = "-";
-    }
-
-    if (ok != 0U)
-    {
-        (void)snprintf(g_capture_notice,
-                       sizeof(g_capture_notice),
-                       "OK CAP DONE id=%lu file=%s",
-                       (unsigned long)request_id,
-                       detail);
-    }
-    else
-    {
-        (void)snprintf(g_capture_notice,
-                       sizeof(g_capture_notice),
-                       "ERR CAP DONE id=%lu reason=%s",
-                       (unsigned long)request_id,
-                       detail);
-    }
-
-    g_capture_notice_pending = 1U;
-}
-
-static uint8_t Vision_CaptureParseId(char **cursor, uint32_t *request_id)
-{
-    char *end;
-    unsigned long value;
-
-    if ((cursor == (char **)0) || (*cursor == (char *)0) || (request_id == (uint32_t *)0))
-    {
-        return 0U;
-    }
-
-    value = strtoul(*cursor, &end, 10);
-    if (end == *cursor)
-    {
-        return 0U;
-    }
-
-    if ((*end != ' ') && (*end != '\t') && (*end != '\0'))
-    {
-        return 0U;
-    }
-
-    while ((*end == ' ') || (*end == '\t'))
-    {
-        end++;
-    }
-
-    *request_id = (uint32_t)value;
-    *cursor = end;
-    return 1U;
-}
-
-static uint8_t Vision_CaptureReadToken(char **cursor, char *token, size_t token_size)
-{
-    size_t i = 0U;
-    char *src;
-
-    if ((cursor == (char **)0) || (*cursor == (char *)0) ||
-        (token == (char *)0) || (token_size == 0U))
-    {
-        return 0U;
-    }
-
-    src = *cursor;
-    while ((*src == ' ') || (*src == '\t'))
-    {
-        src++;
-    }
-
-    if (*src == '\0')
-    {
-        return 0U;
-    }
-
-    while ((*src != '\0') && (*src != ' ') && (*src != '\t') && (i < (token_size - 1U)))
-    {
-        token[i++] = *src++;
-    }
-    token[i] = '\0';
-    *cursor = src;
-    return (uint8_t)(i > 0U);
-}
-
-static void Vision_CaptureCopyToken(char *dest, size_t dest_size, const char *src)
-{
-    size_t length;
-
-    if ((dest == (char *)0) || (dest_size == 0U))
-    {
-        return;
-    }
-
-    if (src == (const char *)0)
-    {
-        src = "-";
-    }
-
-    length = strlen(src);
-    if (length >= dest_size)
-    {
-        length = dest_size - 1U;
-    }
-
-    (void)memcpy(dest, src, length);
-    dest[length] = '\0';
-}
-
-static uint32_t Vision_CaptureElapsedMs(void)
-{
-    if (g_capture_pending_ms == 0U)
-    {
-        return 0U;
-    }
-
-    return (uint32_t)(HAL_GetTick() - g_capture_pending_ms);
 }
 
 static uint32_t Vision_GetAgeMs(void)

@@ -1,4 +1,4 @@
-APP_MODE = "capture"
+APP_MODE = "yolo"
 
 # APP_MODE values:
 # - "capture": UART-triggered image capture tool.

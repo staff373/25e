@@ -25,14 +25,6 @@ DISPLAY_INTERVAL_MS = 200
 PRINT_INTERVAL_MS = 1000
 DISPLAY_EVERY_N_FRAMES = 5
 PRINT_EVERY_N_FRAMES = 20
-TARGET_HOLD_MS = 200
-TARGET_HOLD_FRAMES = 10
-SAVE_MISS_IMAGES = True
-MISS_SAVE_STREAK = 5
-MISS_SAVE_INTERVAL_MS = 500
-MISS_SAVE_EVERY_N_FRAMES = 28
-MISS_SAVE_LIMIT = 40
-MISS_IMAGE_DIR = "/root/miss_debug"
 DEBUG_STATE_TRANSITIONS = False
 SHOW_DISPLAY = True
 
@@ -105,20 +97,6 @@ def file_exists(path):
             return True
         except Exception:
             return False
-
-
-def ensure_dir(path):
-    try:
-        if not os.path.exists(path):
-            makedirs = getattr(os, "makedirs", None)
-            if makedirs is not None:
-                makedirs(path)
-            else:
-                os.mkdir(path)
-        return True
-    except Exception as exc:
-        print("mkdir failed {}: {}".format(path, exc))
-        return False
 
 
 def script_dir():
@@ -199,8 +177,7 @@ def init_context():
     print("uart={} baud={}".format(UART_DEVICE, UART_BAUDRATE))
     print("camera={}x{} aim=({}, {})".format(CAMERA_WIDTH, CAMERA_HEIGHT, AIM_X, AIM_Y))
     print("detector={} input={}x{}".format(detector_name, detector.input_width(), detector.input_height()))
-    print("detect conf={:.2f} iou={:.2f} hold_ms={}".format(CONF_THRESHOLD, IOU_THRESHOLD, TARGET_HOLD_MS))
-    print("miss images={} dir={} limit={}".format(SAVE_MISS_IMAGES, os.path.join(script_dir(), MISS_IMAGE_DIR), MISS_SAVE_LIMIT))
+    print("detect conf={:.2f} iou={:.2f}".format(CONF_THRESHOLD, IOU_THRESHOLD))
     print("protocol=$V,<seq>,<valid>,<x>,<y>,<dx>,<dy>,<area>*<cs>")
 
     return {
@@ -211,13 +188,13 @@ def init_context():
         "display": disp,
         "ok_frames": 0,
         "empty_frames": 0,
+        "last_tx_seq": 0,
         "raw_ok_frames": 0,
         "raw_miss_frames": 0,
         "raw_objects": 0,
         "candidate_objects": 0,
         "raw_object_frames": 0,
         "candidate_frames": 0,
-        "held_frames": 0,
         "miss_streak": 0,
         "max_miss_streak": 0,
         "frame_count": 0,
@@ -226,14 +203,6 @@ def init_context():
         "fps_window_ms": now_ms(),
         "last_display_ms": 0,
         "last_print_ms": 0,
-        "last_valid_ms": 0,
-        "last_valid_frame": 0,
-        "last_valid_target": None,
-        "last_miss_save_ms": 0,
-        "last_miss_save_frame": 0,
-        "miss_save_count": 0,
-        "miss_save_errors": 0,
-        "miss_image_dir": os.path.join(script_dir(), MISS_IMAGE_DIR),
     }
 
 
@@ -300,8 +269,6 @@ def select_target(objects):
             "area": area,
             "score": score,
             "class_id": int(getattr(best, "class_id", -1)),
-            "held": 0,
-            "age_ms": 0,
             "obj": best,
         },
         raw_count,
@@ -319,71 +286,20 @@ def empty_target():
         "area": 0,
         "score": 0.0,
         "class_id": -1,
-        "held": 0,
-        "age_ms": 0,
         "obj": None,
     }
-
-
-def clone_held_target(target, age_ms):
-    held = {
-        "valid": 1,
-        "x": target["x"],
-        "y": target["y"],
-        "dx": target["dx"],
-        "dy": target["dy"],
-        "area": target["area"],
-        "score": target["score"],
-        "class_id": target["class_id"],
-        "held": 1,
-        "age_ms": age_ms,
-        "obj": None,
-    }
-    return held
 
 
 def update_detection_stats(ctx, detected_target):
     if detected_target is not None:
         ctx["raw_ok_frames"] += 1
         ctx["miss_streak"] = 0
-        ctx["last_valid_ms"] = now_ms()
-        ctx["last_valid_frame"] = ctx.get("frame_count", 0)
-        ctx["last_valid_target"] = detected_target
         return
 
     ctx["raw_miss_frames"] += 1
     ctx["miss_streak"] += 1
     if ctx["miss_streak"] > ctx["max_miss_streak"]:
         ctx["max_miss_streak"] = ctx["miss_streak"]
-
-
-def target_age_ms(ctx):
-    last_ms = ctx.get("last_valid_ms", 0)
-    now = now_ms()
-    if last_ms > 0 and now > 0:
-        return max(0, now - last_ms)
-
-    last_frame = ctx.get("last_valid_frame", 0)
-    return max(0, ctx.get("frame_count", 0) - last_frame) * 20
-
-
-def output_target_with_hold(ctx, detected_target):
-    update_detection_stats(ctx, detected_target)
-    if detected_target is not None:
-        return detected_target
-
-    last_target = ctx.get("last_valid_target")
-    if last_target is None:
-        return empty_target()
-
-    age = target_age_ms(ctx)
-    age_frames = max(0, ctx.get("frame_count", 0) - ctx.get("last_valid_frame", 0))
-    has_time = ctx.get("last_valid_ms", 0) > 0 and now_ms() > 0
-    if (has_time and age <= TARGET_HOLD_MS) or ((not has_time) and age_frames <= TARGET_HOLD_FRAMES):
-        ctx["held_frames"] += 1
-        return clone_held_target(last_target, age)
-
-    return empty_target()
 
 
 def send_target(serial_dev, seq, target):
@@ -460,6 +376,11 @@ def frame_ratio(part, total):
     return (part * 100.0) / float(total)
 
 
+def draw_text_rows(img, rows, x, y, line_height=16, color=image.COLOR_WHITE):
+    for index, row in enumerate(rows):
+        img.draw_string(x, y + (index * line_height), row, color=color)
+
+
 def draw_overlay(ctx, img, state, target):
     disp = ctx.get("display")
     if disp is None:
@@ -469,44 +390,47 @@ def draw_overlay(ctx, img, state, target):
 
     try:
         img.draw_rect(AIM_X - 3, AIM_Y - 3, 6, 6, color=image.COLOR_GREEN)
-        img.draw_string(
+        draw_text_rows(
+            img,
+            [
+                "FPS {:.1f} TX {} {}".format(ctx["fps"], ctx.get("last_tx_seq", 0), state),
+                "V{} conf{:.2f} area{}".format(
+                    target["valid"],
+                    target["score"],
+                    target["area"],
+                ),
+                "x{} y{} dx{} dy{} aim{},{}".format(
+                    target["x"],
+                    target["y"],
+                    target["dx"],
+                    target["dy"],
+                    AIM_X,
+                    AIM_Y,
+                ),
+            ],
             2,
             2,
-            "{} fps={:.1f} raw={:.0f}% obj={}/{} ms={} max={}".format(
-                state,
-                ctx["fps"],
-                valid_ratio(ctx),
-                ctx["raw_objects"],
-                ctx["candidate_objects"],
-                ctx["miss_streak"],
-                ctx["max_miss_streak"],
-            ),
-            color=image.COLOR_WHITE,
         )
-        img.draw_string(
+        draw_text_rows(
+            img,
+            [
+                "raw {:.0f}% obj {}/{} miss {}/{}".format(
+                    valid_ratio(ctx),
+                    ctx["raw_objects"],
+                    ctx["candidate_objects"],
+                    ctx["miss_streak"],
+                    ctx["max_miss_streak"],
+                )
+            ],
             2,
-            18,
-            "v={} h={} age={} dx={} dy={} s={:.2f}".format(
-                target["valid"],
-                target["held"],
-                target_age_ms(ctx),
-                target["dx"],
-                target["dy"],
-                target["score"],
-            ),
-            color=image.COLOR_WHITE,
+            CAMERA_HEIGHT - 18,
         )
+        if target["valid"] != 0:
+            img.draw_rect(target["x"] - 2, target["y"] - 2, 4, 4, color=image.COLOR_RED)
 
         obj = target.get("obj")
         if obj is not None:
             img.draw_rect(obj.x, obj.y, obj.w, obj.h, color=image.COLOR_RED)
-            img.draw_rect(target["x"] - 2, target["y"] - 2, 4, 4, color=image.COLOR_RED)
-            img.draw_string(
-                obj.x,
-                obj.y,
-                "dx={} dy={} a={}".format(target["dx"], target["dy"], target["area"]),
-                color=image.COLOR_RED,
-            )
 
         disp.show(img)
     except Exception as exc:
@@ -518,13 +442,11 @@ def print_summary(ctx, seq, state, target):
         return
 
     print(
-        "fps={:.1f} state={} seq={} valid={} held={} age_ms={} x={} y={} dx={} dy={} area={} score={:.2f} ok={} miss={} raw_ok={} raw_miss={} raw_valid={:.1f}% raw_objects={} candidate_objects={} raw_obj_frames={:.1f}% candidate_frames={:.1f}% miss_streak={} max_miss={} held_frames={}".format(
+        "fps={:.1f} state={} seq={} valid={} x={} y={} dx={} dy={} area={} score={:.2f} ok={} miss={} raw_ok={} raw_miss={} raw_valid={:.1f}% raw_objects={} candidate_objects={} raw_obj_frames={:.1f}% candidate_frames={:.1f}% miss_streak={} max_miss={}".format(
             ctx["fps"],
             state,
             seq,
             target["valid"],
-            target["held"],
-            target_age_ms(ctx),
             target["x"],
             target["y"],
             target["dx"],
@@ -542,50 +464,8 @@ def print_summary(ctx, seq, state, target):
             frame_ratio(ctx["candidate_frames"], ctx["frame_count"]),
             ctx["miss_streak"],
             ctx["max_miss_streak"],
-            ctx["held_frames"],
         )
     )
-
-
-def miss_save_due(ctx):
-    if not SAVE_MISS_IMAGES:
-        return False
-    if ctx["miss_save_count"] >= MISS_SAVE_LIMIT:
-        return False
-    if ctx["miss_streak"] < MISS_SAVE_STREAK:
-        return False
-
-    now = now_ms()
-    if now > 0:
-        last = ctx.get("last_miss_save_ms", 0)
-        if last == 0 or (now - last) >= MISS_SAVE_INTERVAL_MS:
-            ctx["last_miss_save_ms"] = now
-            return True
-        return False
-
-    current = ctx.get("frame_count", 0)
-    last_frame = ctx.get("last_miss_save_frame", -MISS_SAVE_EVERY_N_FRAMES)
-    if (current - last_frame) >= MISS_SAVE_EVERY_N_FRAMES:
-        ctx["last_miss_save_frame"] = current
-        return True
-    return False
-
-
-def maybe_save_miss_image(ctx, img, seq):
-    if img is None or not miss_save_due(ctx):
-        return
-    if not ensure_dir(ctx["miss_image_dir"]):
-        return
-
-    filename = "miss_{:05d}_streak_{:04d}.jpg".format(seq, ctx["miss_streak"])
-    path = os.path.join(ctx["miss_image_dir"], filename)
-    try:
-        img.save(path)
-        ctx["miss_save_count"] += 1
-        print("saved miss image:", path)
-    except Exception as exc:
-        ctx["miss_save_errors"] += 1
-        print("save miss image failed {}: {}".format(path, exc))
 
 
 def main():
@@ -623,11 +503,8 @@ def main():
                     ctx["raw_object_frames"] += 1
                 if candidate_objects > 0:
                     ctx["candidate_frames"] += 1
-                current_target = output_target_with_hold(ctx, detected_target)
-                if current_target is None:
-                    current_target = empty_target()
-                if detected_target is None:
-                    maybe_save_miss_image(ctx, current_img, seq)
+                update_detection_stats(ctx, detected_target)
+                current_target = detected_target if detected_target is not None else empty_target()
                 if current_target["valid"] == 0:
                     state = enter_state(state, STATE_SEND_EMPTY)
                 else:
@@ -635,6 +512,7 @@ def main():
 
             elif state == STATE_SEND_TARGET:
                 seq = send_target(ctx["serial"], seq, current_target)
+                ctx["last_tx_seq"] = (seq - 1) & 0xFFFF
                 ctx["ok_frames"] += 1
                 update_frame_stats(ctx)
                 print_summary(ctx, seq, state, current_target)
@@ -644,6 +522,7 @@ def main():
 
             elif state == STATE_SEND_EMPTY:
                 seq = send_target(ctx["serial"], seq, current_target)
+                ctx["last_tx_seq"] = (seq - 1) & 0xFFFF
                 ctx["empty_frames"] += 1
                 update_frame_stats(ctx)
                 print_summary(ctx, seq, state, current_target)

@@ -32,8 +32,8 @@ project.
 ## App Packaging
 
 - This folder is a MaixPy app root. `app.yaml` includes both the capture tool and the YOLO runtime assets.
-- Default app mode is `capture`, so a packaged app starts the UART-triggered capture tool.
-- To package the YOLO UART detector instead, edit `app_config.py` and set `APP_MODE = "yolo"`, then package/install the whole folder again.
+- Current app mode in `app_config.py` is `yolo`, so a packaged app starts the YOLO UART detector.
+- To package the UART-triggered capture tool for dataset collection, edit `app_config.py` and set `APP_MODE = "capture"`, then package/install the whole folder again.
 - Suggested auto-start app id: `yolo`.
 
 ## YOLO Runtime Setup
@@ -49,8 +49,8 @@ project.
 
 - UART sending stays per-frame; do not lower its rate during vision debugging.
 - Current lighting/debug threshold is `CONF_THRESHOLD = 0.15`.
-- After 5 continuous raw YOLO misses, the script saves limited missed frames to device-side `/root/miss_debug/`.
-- Use the saved `/root/miss_debug/*.jpg` images to compare target appearance before and after moving, changing distance, or adding light.
+- A missed YOLO frame is sent immediately as `valid=0`; the runtime no longer holds the previous target.
+- Missed-frame image saving has been removed from `target_yolo_uart.py`; use `capture_uart.py` when image collection is needed.
 
 ## Smoke Test
 
