@@ -11,7 +11,11 @@ extern "C" {
 typedef enum
 {
     TASK_MODE_NONE = 0,
-    TASK_MODE_Q1_TRACK = 1
+    TASK_MODE_Q1_TRACK = 1,
+    TASK_MODE_Q2_AIM_STATIC = 2,
+    TASK_MODE_Q3_AIM_X_REV_SCAN = 3,
+    TASK_MODE_ADV1_AIM_TRACK = 4,
+    TASK_MODE_ADV_TRACK_TEST = 5
 } Task_Mode_t;
 
 typedef enum

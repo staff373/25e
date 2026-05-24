@@ -29,6 +29,13 @@ typedef enum
     TRACK_STOP_REASON_LOST_LINE
 } Track_StopReason_t;
 
+typedef enum
+{
+    TRACK_PRESET_NORMAL = 0,
+    TRACK_PRESET_ADV,
+    TRACK_PRESET_CUSTOM
+} Track_Preset_t;
+
 void Track_Init(void);
 void Track_Poll(void);
 uint8_t Track_Start(void);
@@ -43,6 +50,9 @@ uint8_t Track_GetTargetLaps(void);
 uint8_t Track_GetLapsDone(void);
 uint8_t Track_GetCornerCount(void);
 uint32_t Track_GetElapsedMs(void);
+uint8_t Track_ApplyPreset(Track_Preset_t preset);
+Track_Preset_t Track_GetPreset(void);
+const char *Track_GetPresetName(void);
 uint8_t Track_SetParam(const char *name, float value);
 uint8_t Track_GetParam(const char *name, float *value);
 void Track_FormatStatus(char *buffer, size_t buffer_size, const char *prefix);

@@ -15,12 +15,12 @@
 #define APP_TURN_MIN_RATE_SCALE       (0.35f)
 #define APP_TURN_SETTLE_MAX_MS        (250U)
 
-#define APP_TURN_DEFAULT_OUT_DUTY  (60.0f)  /* 外侧轮前进 duty，越大转得越快 */
-#define APP_TURN_DEFAULT_IN_DUTY   (-25.0f) /* 内侧轮反转 duty，越负越像原地甩弯 */
+#define APP_TURN_DEFAULT_OUT_DUTY  (42.0f)  /* 外侧轮前进 duty，越大转得越快 */
+#define APP_TURN_DEFAULT_IN_DUTY   (-1.5f)  /* 内侧轮反转 duty，越负越像原地甩弯 */
 #define APP_TURN_DEFAULT_ANGLE_DEG (85.0f)  /* JY61P yaw 目标角度，决定转多少 */
 #define APP_TURN_DEFAULT_MAX_MS    (90000U)   /* 转弯超时保护，防止 IMU/轮子异常一直转 */
-#define APP_TURN_DEFAULT_RAMP_DUTY (2.0f)   /* 每 10ms 最大 duty 改变量，降低输出台阶 */
-#define APP_TURN_DEFAULT_RATE_SCALE (1.0f)  /* 角速度曲线整体倍率，>1 更快，<1 更稳 */
+#define APP_TURN_DEFAULT_RAMP_DUTY (1.0f)   /* 每 10ms 最大 duty 改变量，降低输出台阶 */
+#define APP_TURN_DEFAULT_RATE_SCALE (0.60f) /* 角速度曲线整体倍率，>1 更快，<1 更稳 */
 #define APP_TURN_DEFAULT_RATE_KP   (0.015f) /* 超过角速度限制后 duty 收缩强度 */
 #define APP_TURN_DEFAULT_STOP_RATE (25.0f)  /* settle 阶段认为车身基本停稳的 gyro_z 阈值 */
 #define APP_TURN_PARAM_TIME_MS_MAX (4294967040.0f)

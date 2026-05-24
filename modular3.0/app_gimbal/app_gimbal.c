@@ -5,10 +5,14 @@
 
 #include <stdio.h>
 
-#define GIMBAL_DEFAULT_SPEED_SPS        (400.0f)
+#define GIMBAL_DEFAULT_SPEED_SPS        (1000.0f)
 #define GIMBAL_MAX_COMMAND_SPEED_SPS    (4000.0f)
-#define GIMBAL_DEFAULT_ACCEL_SPS2       (3000.0f)
+#define GIMBAL_DEFAULT_ACCEL_SPS2       (6000.0f)
 #define GIMBAL_MAX_RELATIVE_STEPS       (2000L)
+#define GIMBAL_DEFAULT_CAL_A            (-1.07f)
+#define GIMBAL_DEFAULT_CAL_B            (-0.05f)
+#define GIMBAL_DEFAULT_CAL_C            (0.04f)
+#define GIMBAL_DEFAULT_CAL_D            (0.91f)
 
 typedef enum
 {
@@ -42,7 +46,11 @@ void Gimbal_Init(void)
 {
     BSP_Stepper_Init();
     Gimbal_SetHoldEnabled(0U);
-    g_gimbal_calibrated = 0U;
+    g_gimbal_cal_a = GIMBAL_DEFAULT_CAL_A;
+    g_gimbal_cal_b = GIMBAL_DEFAULT_CAL_B;
+    g_gimbal_cal_c = GIMBAL_DEFAULT_CAL_C;
+    g_gimbal_cal_d = GIMBAL_DEFAULT_CAL_D;
+    g_gimbal_calibrated = 1U;
     g_gimbal_last_error = GIMBAL_ERR_NONE;
     Gimbal_EnterState(GIMBAL_STATE_IDLE);
 }

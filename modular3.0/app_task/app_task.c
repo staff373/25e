@@ -1,11 +1,16 @@
 #include "app_task.h"
 
+#include "app_aim.h"
+#include "app_imu.h"
 #include "app_motion.h"
 #include "app_track.h"
 #include "app_turn.h"
 #include "main.h"
 
 #include <stdio.h>
+
+#define TASK_Q2_AIM_TIMEOUT_MS (2000U)
+#define TASK_Q3_AIM_TIMEOUT_MS (4000U)
 
 static Task_Mode_t g_task_mode = TASK_MODE_NONE;
 static Task_State_t g_task_state = TASK_STATE_IDLE;
@@ -33,6 +38,7 @@ void Task_Init(void)
 
 void Task_Poll(void)
 {
+    Aim_State_t aim_state;
     Track_State_t track_state;
     Track_StopReason_t track_stop_reason;
 
@@ -41,7 +47,11 @@ void Task_Poll(void)
         return;
     }
 
-    if (g_task_mode != TASK_MODE_Q1_TRACK)
+    if ((g_task_mode != TASK_MODE_Q1_TRACK) &&
+        (g_task_mode != TASK_MODE_Q2_AIM_STATIC) &&
+        (g_task_mode != TASK_MODE_Q3_AIM_X_REV_SCAN) &&
+        (g_task_mode != TASK_MODE_ADV1_AIM_TRACK) &&
+        (g_task_mode != TASK_MODE_ADV_TRACK_TEST))
     {
         g_task_stop_reason = TASK_STOP_REASON_UNSUPPORTED;
         g_task_stop_ms = HAL_GetTick();
@@ -51,8 +61,64 @@ void Task_Poll(void)
     }
 
     track_state = Track_GetState();
+    if (g_task_mode == TASK_MODE_ADV1_AIM_TRACK)
+    {
+        Aim_UpdateTrackHint(track_state,
+                            Turn_GetDirection(),
+                            Turn_GetProgressDeg(),
+                            Imu_GetGyroZDps());
+    }
+
+    if ((g_task_mode == TASK_MODE_Q2_AIM_STATIC) ||
+        (g_task_mode == TASK_MODE_Q3_AIM_X_REV_SCAN))
+    {
+        aim_state = Aim_GetState();
+        if (aim_state == AIM_STATE_LOCKED)
+        {
+            g_task_stop_reason = TASK_STOP_REASON_COMPLETE;
+            g_task_stop_ms = HAL_GetTick();
+            Task_EnterState(TASK_STATE_FINISHED);
+            return;
+        }
+
+        if (aim_state == AIM_STATE_ERROR)
+        {
+            g_task_stop_reason = TASK_STOP_REASON_CHILD_STOPPED;
+            g_task_stop_ms = HAL_GetTick();
+            Task_EnterState(TASK_STATE_ERROR);
+            return;
+        }
+
+        if (aim_state == AIM_STATE_IDLE)
+        {
+            g_task_stop_reason = TASK_STOP_REASON_CHILD_STOPPED;
+            g_task_stop_ms = HAL_GetTick();
+            Task_EnterState(TASK_STATE_ERROR);
+        }
+        return;
+    }
+
+    if (g_task_mode == TASK_MODE_ADV1_AIM_TRACK)
+    {
+        aim_state = Aim_GetState();
+        if ((aim_state == AIM_STATE_ERROR) ||
+            (aim_state == AIM_STATE_IDLE) ||
+            (aim_state == AIM_STATE_LOCKED))
+        {
+            g_task_stop_reason = TASK_STOP_REASON_CHILD_STOPPED;
+            g_task_stop_ms = HAL_GetTick();
+            Task_StopChildren();
+            Task_EnterState(TASK_STATE_ERROR);
+            return;
+        }
+    }
+
     if (track_state == TRACK_STATE_FINISHED)
     {
+        if (g_task_mode == TASK_MODE_ADV1_AIM_TRACK)
+        {
+            Aim_Stop();
+        }
         g_task_stop_reason = TASK_STOP_REASON_COMPLETE;
         g_task_stop_ms = HAL_GetTick();
         Task_EnterState(TASK_STATE_FINISHED);
@@ -63,6 +129,10 @@ void Task_Poll(void)
     {
         track_stop_reason = Track_GetStopReason();
         g_task_stop_ms = HAL_GetTick();
+        if (g_task_mode == TASK_MODE_ADV1_AIM_TRACK)
+        {
+            Aim_Stop();
+        }
         if (track_stop_reason == TRACK_STOP_REASON_USER)
         {
             g_task_stop_reason = TASK_STOP_REASON_USER;
@@ -108,6 +178,16 @@ uint8_t Task_Select(Task_Mode_t mode)
     g_task_stop_reason = TASK_STOP_REASON_NONE;
     g_task_start_ms = 0U;
     g_task_stop_ms = 0U;
+    if (mode == TASK_MODE_Q1_TRACK)
+    {
+        (void)Track_ApplyPreset(TRACK_PRESET_NORMAL);
+    }
+    else if ((mode == TASK_MODE_ADV1_AIM_TRACK) ||
+             (mode == TASK_MODE_ADV_TRACK_TEST))
+    {
+        (void)Track_ApplyPreset(TRACK_PRESET_ADV);
+        (void)Track_SetTargetLaps(1U);
+    }
     Task_EnterState(TASK_STATE_SELECTED);
     return 1U;
 }
@@ -118,6 +198,12 @@ uint8_t Task_SelectQuestion(uint8_t question_id)
     {
     case 1U:
         return Task_Select(TASK_MODE_Q1_TRACK);
+    case 2U:
+        return Task_Select(TASK_MODE_Q2_AIM_STATIC);
+    case 3U:
+        return Task_Select(TASK_MODE_Q3_AIM_X_REV_SCAN);
+    case 4U:
+        return Task_Select(TASK_MODE_ADV1_AIM_TRACK);
     default:
         g_task_stop_reason = TASK_STOP_REASON_UNSUPPORTED;
         if (Task_IsRunning() == 0U)
@@ -149,6 +235,44 @@ uint8_t Task_Start(void)
 
     if (g_task_mode == TASK_MODE_Q1_TRACK)
     {
+        (void)Track_ApplyPreset(TRACK_PRESET_NORMAL);
+        if (Track_Start() != 0U)
+        {
+            Task_EnterState(TASK_STATE_RUNNING);
+            return 1U;
+        }
+    }
+    else if (g_task_mode == TASK_MODE_Q2_AIM_STATIC)
+    {
+        if (Aim_StartOnce(TASK_Q2_AIM_TIMEOUT_MS) != 0U)
+        {
+            Task_EnterState(TASK_STATE_RUNNING);
+            return 1U;
+        }
+    }
+    else if (g_task_mode == TASK_MODE_Q3_AIM_X_REV_SCAN)
+    {
+        if (Aim_StartQuestion3(TASK_Q3_AIM_TIMEOUT_MS) != 0U)
+        {
+            Task_EnterState(TASK_STATE_RUNNING);
+            return 1U;
+        }
+    }
+    else if (g_task_mode == TASK_MODE_ADV1_AIM_TRACK)
+    {
+        (void)Track_ApplyPreset(TRACK_PRESET_ADV);
+        (void)Track_SetTargetLaps(1U);
+        if ((Track_Start() != 0U) && (Aim_StartTrack() != 0U))
+        {
+            Task_EnterState(TASK_STATE_RUNNING);
+            return 1U;
+        }
+    }
+    else if (g_task_mode == TASK_MODE_ADV_TRACK_TEST)
+    {
+        Aim_Stop();
+        (void)Track_ApplyPreset(TRACK_PRESET_ADV);
+        (void)Track_SetTargetLaps(1U);
         if (Track_Start() != 0U)
         {
             Task_EnterState(TASK_STATE_RUNNING);
@@ -206,6 +330,14 @@ const char *Task_GetModeName(void)
         return "NONE";
     case TASK_MODE_Q1_TRACK:
         return "Q1_TRACK";
+    case TASK_MODE_Q2_AIM_STATIC:
+        return "Q2_AIM_STATIC";
+    case TASK_MODE_Q3_AIM_X_REV_SCAN:
+        return "Q3_AIM_X_REV_SCAN";
+    case TASK_MODE_ADV1_AIM_TRACK:
+        return "ADV1_AIM_TRACK";
+    case TASK_MODE_ADV_TRACK_TEST:
+        return "ADV_TRACK_TEST";
     default:
         return "UNKNOWN";
     }
@@ -292,7 +424,7 @@ void Task_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
 
     (void)snprintf(buffer,
                    buffer_size,
-                   "%s TASK state=%s mode=%s elapsed=%lu state_ms=%lu stop=%s track=%s track_stop=%s laps=%u/%u corners=%u",
+                   "%s TASK state=%s mode=%s elapsed=%lu state_ms=%lu stop=%s track=%s track_stop=%s laps=%u/%u corners=%u aim=%s",
                    prefix,
                    Task_GetStateName(),
                    Task_GetModeName(),
@@ -303,7 +435,8 @@ void Task_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
                    Track_GetStopReasonName(),
                    (unsigned int)Track_GetLapsDone(),
                    (unsigned int)Track_GetTargetLaps(),
-                   (unsigned int)Track_GetCornerCount());
+                   (unsigned int)Track_GetCornerCount(),
+                   Aim_GetStateName());
 }
 
 static void Task_EnterState(Task_State_t next)
@@ -314,6 +447,7 @@ static void Task_EnterState(Task_State_t next)
 
 static void Task_StopChildren(void)
 {
+    Aim_Stop();
     Track_Stop();
     Turn_Stop();
     Motion_Stop();
@@ -321,7 +455,11 @@ static void Task_StopChildren(void)
 
 static uint8_t Task_ModeIsSupported(Task_Mode_t mode)
 {
-    return (uint8_t)(mode == TASK_MODE_Q1_TRACK);
+    return (uint8_t)((mode == TASK_MODE_Q1_TRACK) ||
+                     (mode == TASK_MODE_Q2_AIM_STATIC) ||
+                     (mode == TASK_MODE_Q3_AIM_X_REV_SCAN) ||
+                     (mode == TASK_MODE_ADV1_AIM_TRACK) ||
+                     (mode == TASK_MODE_ADV_TRACK_TEST));
 }
 
 static uint8_t Task_IsRunning(void)

@@ -14,11 +14,20 @@
 #define APP_TRACK_DEFAULT_BASE_DUTY  (33.0f)   /* 循迹基础速度，直线和出弯恢复都用它 */
 #define APP_TRACK_DEFAULT_KP         (60.0f)   /* 比例修正强度，越大转向越积极 */
 #define APP_TRACK_DEFAULT_KD         (8.0f)    /* 微分阻尼强度，越大越压摆动 */
-#define APP_TRACK_DEFAULT_CENTER_BIAS (1.3f)   /* 居中态固定纠偏，默认 0，现场按机械偏差调 */
-#define APP_TRACK_DEFAULT_CORNER_ADVANCE_MS (220U) /* 右角点后继续直走多久再进入转弯 */
+#define APP_TRACK_DEFAULT_CENTER_BIAS (-0.8f)   /* 居中态固定纠偏，默认 0，现场按机械偏差调 */
+#define APP_TRACK_DEFAULT_CORNER_ADVANCE_MS (20U) /* 右角点后继续直走多久再进入转弯 */
 #define APP_TRACK_DEFAULT_RECOVER_MS (0U)    /* 转完后先直走多久，再重新回到循迹 */
 #define APP_TRACK_DEFAULT_LEFT_TRIM  (0.89f)  /* 机械右偏补偿：左侧轮按实测比例降速 */
 #define APP_TRACK_DEFAULT_RIGHT_TRIM (1.00f)
+// 进阶题参数
+#define APP_TRACK_ADV_BASE_DUTY      (26.0f)
+#define APP_TRACK_ADV_KP             (50.0f)
+#define APP_TRACK_ADV_KD             (8.0f)
+#define APP_TRACK_ADV_CENTER_BIAS    (1.3f)
+#define APP_TRACK_ADV_CORNER_ADVANCE_MS (130U)
+#define APP_TRACK_ADV_RECOVER_MS     (0U)
+#define APP_TRACK_ADV_LEFT_TRIM      (0.95f)
+#define APP_TRACK_ADV_RIGHT_TRIM     (1.00f)
 #define APP_TRACK_PARAM_GAIN_MAX     (FLT_MAX)
 #define APP_TRACK_PARAM_BIAS_LIMIT   (100.0f)
 #define APP_TRACK_PARAM_TRIM_MAX     (1.50f)
@@ -43,6 +52,7 @@ static int8_t g_track_corner_dir = 0;
 static uint8_t g_track_target_laps = APP_TRACK_DEFAULT_TARGET_LAPS;
 static uint8_t g_track_corner_count = 0U;
 static uint8_t g_track_laps_done = 0U;
+static Track_Preset_t g_track_preset = TRACK_PRESET_NORMAL;
 static float g_track_base_duty = APP_TRACK_DEFAULT_BASE_DUTY;
 static float g_track_kp = APP_TRACK_DEFAULT_KP;
 static float g_track_kd = APP_TRACK_DEFAULT_KD;
@@ -60,6 +70,14 @@ static void Track_StopWithReason(Track_State_t stop_state, Track_StopReason_t re
 static void Track_RecordCompletedCorner(void);
 static uint8_t Track_IsTargetComplete(void);
 static void Track_ApplyPidParams(void);
+static void Track_ApplyTuning(float base_duty,
+                              float kp,
+                              float kd,
+                              float center_bias,
+                              uint32_t corner_advance_ms,
+                              uint32_t recover_ms,
+                              float left_trim,
+                              float right_trim);
 static float Track_Clamp(float value, float min_value, float max_value);
 static void Track_ApplyFollowControl(void);
 static void Track_SetAutoDuty(float left_duty, float right_duty);
@@ -86,6 +104,7 @@ void Track_Init(void)
     g_track_start_ms = 0U;
     g_track_stop_ms = 0U;
     g_track_target_laps = APP_TRACK_DEFAULT_TARGET_LAPS;
+    g_track_preset = TRACK_PRESET_NORMAL;
     g_track_stop_reason = TRACK_STOP_REASON_NONE;
     Track_ResetProgress();
     g_track_state = TRACK_STATE_IDLE;
@@ -334,6 +353,59 @@ uint32_t Track_GetElapsedMs(void)
     return (uint32_t)(HAL_GetTick() - g_track_start_ms);
 }
 
+uint8_t Track_ApplyPreset(Track_Preset_t preset)
+{
+    switch (preset)
+    {
+    case TRACK_PRESET_NORMAL:
+        Track_ApplyTuning(APP_TRACK_DEFAULT_BASE_DUTY,
+                          APP_TRACK_DEFAULT_KP,
+                          APP_TRACK_DEFAULT_KD,
+                          APP_TRACK_DEFAULT_CENTER_BIAS,
+                          APP_TRACK_DEFAULT_CORNER_ADVANCE_MS,
+                          APP_TRACK_DEFAULT_RECOVER_MS,
+                          APP_TRACK_DEFAULT_LEFT_TRIM,
+                          APP_TRACK_DEFAULT_RIGHT_TRIM);
+        g_track_preset = TRACK_PRESET_NORMAL;
+        return 1U;
+
+    case TRACK_PRESET_ADV:
+        Track_ApplyTuning(APP_TRACK_ADV_BASE_DUTY,
+                          APP_TRACK_ADV_KP,
+                          APP_TRACK_ADV_KD,
+                          APP_TRACK_ADV_CENTER_BIAS,
+                          APP_TRACK_ADV_CORNER_ADVANCE_MS,
+                          APP_TRACK_ADV_RECOVER_MS,
+                          APP_TRACK_ADV_LEFT_TRIM,
+                          APP_TRACK_ADV_RIGHT_TRIM);
+        g_track_preset = TRACK_PRESET_ADV;
+        return 1U;
+
+    default:
+        return 0U;
+    }
+}
+
+Track_Preset_t Track_GetPreset(void)
+{
+    return g_track_preset;
+}
+
+const char *Track_GetPresetName(void)
+{
+    switch (g_track_preset)
+    {
+    case TRACK_PRESET_NORMAL:
+        return "NORMAL";
+    case TRACK_PRESET_ADV:
+        return "ADV";
+    case TRACK_PRESET_CUSTOM:
+        return "CUSTOM";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 uint8_t Track_SetParam(const char *name, float value)
 {
     if (name == (const char *)0)
@@ -344,6 +416,7 @@ uint8_t Track_SetParam(const char *name, float value)
     if (strcmp(name, "BASE") == 0)
     {
         g_track_base_duty = Track_Clamp(value, 0.0f, 100.0f); /* duty 物理上限就是 100 */
+        g_track_preset = TRACK_PRESET_CUSTOM;
         return 1U;
     }
 
@@ -351,6 +424,7 @@ uint8_t Track_SetParam(const char *name, float value)
     {
         g_track_kp = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_GAIN_MAX); /* 越大，偏线时修得越猛 */
         Track_ApplyPidParams();
+        g_track_preset = TRACK_PRESET_CUSTOM;
         return 1U;
     }
 
@@ -358,6 +432,7 @@ uint8_t Track_SetParam(const char *name, float value)
     {
         g_track_kd = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_GAIN_MAX); /* 越大，越抑制来回摆动 */
         Track_ApplyPidParams();
+        g_track_preset = TRACK_PRESET_CUSTOM;
         return 1U;
     }
 
@@ -366,18 +441,21 @@ uint8_t Track_SetParam(const char *name, float value)
         g_track_center_bias = Track_Clamp(value,
                                           -APP_TRACK_PARAM_BIAS_LIMIT,
                                           APP_TRACK_PARAM_BIAS_LIMIT);
+        g_track_preset = TRACK_PRESET_CUSTOM;
         return 1U;
     }
 
     if (strcmp(name, "CORNER_ADVANCE_MS") == 0)
     {
         g_track_corner_advance_ms = (uint32_t)Track_Clamp(value, 0.0f, APP_TRACK_PARAM_TIME_MS_MAX);
+        g_track_preset = TRACK_PRESET_CUSTOM;
         return 1U;
     }
 
     if (strcmp(name, "RECOVER_MS") == 0)
     {
         g_track_recover_ms = (uint32_t)Track_Clamp(value, 0.0f, APP_TRACK_PARAM_TIME_MS_MAX); /* 大了出弯更稳，小了更快回循迹 */
+        g_track_preset = TRACK_PRESET_CUSTOM;
         return 1U;
     }
 
@@ -389,12 +467,14 @@ uint8_t Track_SetParam(const char *name, float value)
     if ((strcmp(name, "LEFT_TRIM") == 0) || (strcmp(name, "L_TRIM") == 0))
     {
         g_track_left_trim = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_TRIM_MAX);
+        g_track_preset = TRACK_PRESET_CUSTOM;
         return 1U;
     }
 
     if ((strcmp(name, "RIGHT_TRIM") == 0) || (strcmp(name, "R_TRIM") == 0))
     {
         g_track_right_trim = Track_Clamp(value, 0.0f, APP_TRACK_PARAM_TRIM_MAX);
+        g_track_preset = TRACK_PRESET_CUSTOM;
         return 1U;
     }
 
@@ -496,9 +576,10 @@ void Track_FormatStatus(char *buffer, size_t buffer_size, const char *prefix)
 
     (void)snprintf(buffer,
                    buffer_size,
-                   "%s TRACK state=%s laps=%u/%u corners=%u elapsed=%lu state_ms=%lu raw=0x%02X norm=%.3f corner=%d stop=%s base=%.1f kp=%.1f kd=%.1f center_bias=%.2f corner_advance_ms=%lu advance_left_ms=%lu recover_ms=%lu trim=%.3f/%.3f corr=%.1f line=%.1f",
+                   "%s TRACK state=%s preset=%s laps=%u/%u corners=%u elapsed=%lu state_ms=%lu raw=0x%02X norm=%.3f corner=%d stop=%s base=%.1f kp=%.1f kd=%.1f center_bias=%.2f corner_advance_ms=%lu advance_left_ms=%lu recover_ms=%lu trim=%.3f/%.3f corr=%.1f line=%.1f",
                    prefix,
                    Track_GetStateName(),
+                   Track_GetPresetName(),
                    (unsigned int)g_track_laps_done,
                    (unsigned int)g_track_target_laps,
                    (unsigned int)g_track_corner_count,
@@ -577,6 +658,35 @@ static void Track_ApplyPidParams(void)
 {
     g_track_pid.params.kp = g_track_kp;
     g_track_pid.params.kd = g_track_kd;
+}
+
+static void Track_ApplyTuning(float base_duty,
+                              float kp,
+                              float kd,
+                              float center_bias,
+                              uint32_t corner_advance_ms,
+                              uint32_t recover_ms,
+                              float left_trim,
+                              float right_trim)
+{
+    g_track_base_duty = Track_Clamp(base_duty, 0.0f, 100.0f);
+    g_track_kp = Track_Clamp(kp, 0.0f, APP_TRACK_PARAM_GAIN_MAX);
+    g_track_kd = Track_Clamp(kd, 0.0f, APP_TRACK_PARAM_GAIN_MAX);
+    g_track_center_bias = Track_Clamp(center_bias,
+                                      -APP_TRACK_PARAM_BIAS_LIMIT,
+                                      APP_TRACK_PARAM_BIAS_LIMIT);
+    g_track_corner_advance_ms = (uint32_t)Track_Clamp((float)corner_advance_ms,
+                                                      0.0f,
+                                                      APP_TRACK_PARAM_TIME_MS_MAX);
+    g_track_recover_ms = (uint32_t)Track_Clamp((float)recover_ms,
+                                               0.0f,
+                                               APP_TRACK_PARAM_TIME_MS_MAX);
+    g_track_left_trim = Track_Clamp(left_trim, 0.0f, APP_TRACK_PARAM_TRIM_MAX);
+    g_track_right_trim = Track_Clamp(right_trim, 0.0f, APP_TRACK_PARAM_TRIM_MAX);
+    if (g_track_initialized != 0U)
+    {
+        Track_ApplyPidParams();
+    }
 }
 
 static float Track_Clamp(float value, float min_value, float max_value)

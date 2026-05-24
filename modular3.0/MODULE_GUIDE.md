@@ -194,12 +194,13 @@
 
 ### `app_aim`
 
-- 功能：瞄准策略骨架，消费 `Vision_GetTarget`，通过 `app_gimbal` 执行一次瞄准或连续跟踪；画圆等发挥题策略后续继续放在这里。
+- 功能：瞄准策略骨架，消费 `Vision_GetTarget`，只按新视觉 `seq` 更新 3 帧中值滤波，再通过 `app_gimbal` 执行一次瞄准、连续跟踪或第三问 X 轴整圈搜索瞄准；当前锁定阈值为 `2px`，退出观察阈值为 `4px`，第三问运动中发现、停稳确认和锁定确认都按新视觉帧计数到 3。
 - 对外接口：
   - `Aim_Init`
   - `Aim_Poll`
   - `Aim_StartOnce`
   - `Aim_StartTrack`
+  - `Aim_StartQuestion3`
   - `Aim_Stop`
   - `Aim_FormatStatus`
 - 主要调用者：
@@ -261,7 +262,7 @@
 
 ### `app_task`
 
-- 功能：多题顶层调度，当前支持 `Q1_TRACK`，负责选择题目、启动当前题目、停止、复位和汇总完成/失败原因。
+- 功能：多题顶层调度，当前支持 `Q1_TRACK`、`Q2_AIM_STATIC` 和 `Q3_AIM_X_REV_SCAN`，负责选择题目、启动当前题目、停止、复位和汇总完成/失败原因。
 - 对外接口：
   - `Task_Init`
   - `Task_Poll`
@@ -317,9 +318,11 @@
 ### 视觉瞄准骨架
 
 1. MaixCAM 发送 `$V` 坐标帧，`app_vision` 更新 `dx/dy`
-2. 蓝牙用 `GIMBAL CAL SET a b c d` 写入像素到步数矩阵
+2. `app_gimbal` 上电默认加载半增益像素到步数矩阵；蓝牙仍可用 `GIMBAL CAL SET a b c d` 覆盖
 3. `AIM ONCE` 调用 `Aim_StartOnce`，误差超阈值时经 `Gimbal_MoveByPixelError` 发一段定步运动
-4. `AIM TRACK` 每约 50ms 在云台空闲时按最新像素误差发一小段定步运动
+4. `TASK 2` + `TASK START` 由 `app_task` 启动 `Q2_AIM_STATIC`，内部调用同一套 `Aim_StartOnce(2000)` 并等待 `LOCKED` 或 `ERROR`
+5. `TASK 3` + `TASK START` 由 `app_task` 启动 `Q3_AIM_X_REV_SCAN`，先只动 X 轴按固定方向整圈搜索；运动中看到至少 3 个新的有效视觉帧后停止搜索，停稳 100ms 后再静止确认 3 个新有效帧，最后进入同一套滤波和分段增益闭环
+6. `AIM TRACK` 每约 50ms 在云台空闲时按最新像素误差发一小段定步运动
 
 ### 自动循迹
 

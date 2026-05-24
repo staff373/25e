@@ -89,7 +89,7 @@
 | `STOP` | 停止循迹、停止转弯、停止电机 |
 | `STATUS` | 查询当前主状态 |
 | `SENSOR?` | 查询五路灰度当前状态 |
-| `TRACK?` | 查询循迹状态、圈数、灰度角点、PID 修正、CENTER_BIAS 和停机原因 |
+| `TRACK?` | 查询循迹状态、preset、圈数、灰度角点、PID 修正、CENTER_BIAS 和停机原因 |
 | `IMU?` | 查询 JY61P init / online / yaw / gyro_z |
 | `VISION?` | 查询视觉接收、在线、坏帧、最新坐标和最近一帧状态 |
 | `VISION ON` | 打开 USART2 接收 |
@@ -105,12 +105,16 @@
 | `GIMBAL ESTOP` | 云台急停 |
 | `GIMBAL CAL?` | 查询像素到步数 2x2 标定矩阵 |
 | `GIMBAL CAL SET <a> <b> <c> <d>` | 设置 `x_steps=a*dx+b*dy`、`y_steps=c*dx+d*dy` |
-| `AIM?` | 查询瞄准状态 |
+| `AIM?` | 查询瞄准状态、原始误差、滤波误差、分段增益和锁定阈值 |
 | `AIM ONCE` | 启动一次瞄准骨架 |
 | `AIM TRACK` | 启动连续跟踪骨架 |
 | `AIM STOP` | 停止瞄准和云台 |
 | `TASK?` | 查询顶层任务状态 |
-| `TASK 1` | 选择第一问 `Q1_TRACK` |
+| `TASK 1` | 选择第一问 `Q1_TRACK`，并套回 `NORMAL` 循迹参数 |
+| `TASK 2` | 选择第二问静态瞄准 `Q2_AIM_STATIC` |
+| `TASK 3` | 选择第三问 X 轴整圈搜索瞄准 `Q3_AIM_X_REV_SCAN` |
+| `TASK ADVTRACK` / `TASK AT` | 选择进阶题 ADV 参数巡线-only 测试并立即套 ADV 参数，不启动视觉 |
+| `TASK ADV1` / `TASK A1` | 选择发挥（1）ADV 参数巡线 + 连续视觉瞄准，并立即套 ADV 参数 |
 | `TASK START` | 启动当前选择的题目 |
 | `TASK STOP` | 停止当前题目并停车 |
 | `TASK RESET` | 清顶层任务状态，保留当前题目选择 |
@@ -143,8 +147,22 @@
 | `TURN_STOP_RATE` | `SETTLE` 阶段放行的 gyro_z 阈值 | `1 ~ 720 deg/s` | 小了等车身更稳，太小会多等到超时兜底 |
 | `TURN_R0/R15/.../R90` | 剩余角度为 0/15/.../90 度时的最大 gyro_z | `1 ~ 720 deg/s` | 每 15 度一个标定点，中间线性插值 |
 | `LAPS` / `N` | 目标圈数 | `1 ~ 5` | 达到目标圈数后自动停车 |
+| `AIM_LINE_PRED_X/Y` | ADV 直线段视觉速度预测系数 | `-3 ~ 3` | 默认 `1.0/0.15`，只补动态滞后；静态晃动时先调小 |
+| `AIM_TURN_PREFEED_X/Y` | 角点后转弯前的云台预置步数 | `-1000 ~ 1000` | 默认 `220/0`，当前会受 `AIM_TURN_FF_MAX_STEP` 单次限幅保护；方向错就改符号 |
+| `AIM_TURN_FF_X/Y_PER_DEG` | 转弯中按 yaw 进度叠加的云台步数/度 | `-20 ~ 20` | 默认 `5.5/0`，90 度右转约补 500 步量级；目标继续被甩就加大，过冲就减小 |
+| `AIM_TURN_FF_GYRO_X/Y` | 转弯中按 gyro_z 和时间叠加的云台步数前馈 | `-20 ~ 20` | 默认 `0.35/0`，用于补角速度快时的短时滞后 |
+| `AIM_TURN_FF_MAX_STEP` | 单次转弯前馈步数限幅 | `0 ~ 1000` | 默认 `140`，保护云台单次动作幅度；调预置大于该值时也要同步增大它 |
+| `AIM_TURN_FF_SPEED_SPS` | 转弯前馈步进速度 | `1 ~ 4000 sps` | 默认 `2200`，太低会来不及补，太高可能丢步或抖 |
 
 参数只在运行期通过蓝牙 `SET` 生效，不做 Flash 保存。
+
+ADV 动态瞄准调参顺序：
+
+1. 先看 `AIM?` 的 `dx/dy/ff_step/cmd_dx/cmd_dy/trk`。`trk=TURN_PREFEED/TURN_FEED` 时 `ff_step` 和 `cmd_dx/cmd_dy` 表示云台步数，不再是伪像素。右转时若 `ff_step` 出来后 `dx` 绝对值继续变大，先把 `AIM_TURN_PREFEED_X`、`AIM_TURN_FF_X_PER_DEG`、`AIM_TURN_FF_GYRO_X` 整体改成相反符号。
+2. 若一进弯就丢目标，先调 `AIM_TURN_PREFEED_X`，例如 `SET AIM_TURN_PREFEED_X 260`；若 `AIM? ff_step` 仍卡在 `140`，同步调 `SET AIM_TURN_FF_MAX_STEP 180`。
+3. 若转弯中段慢慢甩开，调 `AIM_TURN_FF_X_PER_DEG`，例如 `5.5 -> 6.5`；若出弯后反向过冲，降到 `4.0~5.0`。
+4. 若只有转弯最快那一下跟不上，调 `AIM_TURN_FF_GYRO_X`，例如 `0.35 -> 0.45`；若画面抖或来回补，降到 `0.20` 或关掉。
+5. 直线段只调 `AIM_LINE_PRED_X/Y`。直线滞后就小幅增加，目标附近来回晃就减小；不要靠增大全局 `GIMBAL CAL` 矩阵解决动态问题。
 
 ## 比赛状态机
 
@@ -188,8 +206,10 @@ build/Debug/hal3_0.elf
 
 1. 先用 `PING`、`SENSOR?`、`IMU?`、`VISION?` 确认三路串口状态。
 2. 用 `MOTOR` 单独确认四轮正反和左右对应关系。
-3. 用 `TASK?` 确认顶层任务处于 `SELECTED` / `Q1_TRACK`。
+3. 用 `TASK?` 确认顶层任务处于 `SELECTED` / `Q1_TRACK`，或用 `TASK 2`/`TASK 3` 选择静态瞄准。
 4. 用 `TURN L` / `TURN R` 单独把 `TURN_OUT`、`TURN_IN`、`TURN_ANGLE`、`TURN_RAMP`、`TURN_RATE_SCALE`、`TURN_RATE_KP`、`MAX_TURN_MS` 调稳；用 `TURN?` 看 `remain/rate_lim/scale/out/in`。
 5. 再开 `TASK START` 或兼容 `TRACK START`，先调 `BASE`、`KP`、`KD`、`CENTER_BIAS`、`LEFT_TRIM`、`RIGHT_TRIM`、`CORNER_ADVANCE_MS`、`RECOVER_MS`；直线仍抖时看 `TRACK?` 里的 `raw/norm/corner/line/corr`。
 6. 现场优先保证直角弯成功率，再压缩速度。
 7. 云台未确认机械限位前，只用 `GIMBAL MOVE X 20 200`、`GIMBAL MOVE Y 20 200` 这类低速小步数烟测。
+8. 静态瞄准上电默认已加载半增益矩阵，可先用 `GIMBAL CAL?` 确认 `valid=1`，再用 `TASK 2` + `TASK START` 验证 `AIM` 进入 `LOCKED` 且光斑接近靶心；当前 `LOCKED` 阈值为 `2px`。
+9. 第三问先把 Y 轴抬到目标可见高度，再用 `TASK 3` + `TASK START`；`AIM?` 中 `q3_seen` 到 3 才会停止 X 整圈搜索，停稳后 `q3_stable` 到 3 才进入闭环，`q3_lock` 到 3 才完成锁定，`q3_rev` 默认 2400 步，现场仍可按实测一圈步数校正。

@@ -30,7 +30,7 @@ static uint8_t BT_ParseTaskQuestion(const char *text, uint8_t *question_id);
 
 void BT_ProcessLine(char *line)
 {
-    char response[512];
+    char response[768];
     char *cmd;
     char *param_name;
     float value;
@@ -518,6 +518,32 @@ void BT_ProcessLine(char *line)
         return;
     }
 
+    if ((strcmp(cmd, "TASK ADV1") == 0) || (strcmp(cmd, "TASK A1") == 0))
+    {
+        if (Task_Select(TASK_MODE_ADV1_AIM_TRACK) != 0U)
+        {
+            BT_WriteLine("OK TASK ADV1");
+        }
+        else
+        {
+            BT_WriteLine("ERR TASK");
+        }
+        return;
+    }
+
+    if ((strcmp(cmd, "TASK ADVTRACK") == 0) || (strcmp(cmd, "TASK AT") == 0))
+    {
+        if (Task_Select(TASK_MODE_ADV_TRACK_TEST) != 0U)
+        {
+            BT_WriteLine("OK TASK ADVTRACK");
+        }
+        else
+        {
+            BT_WriteLine("ERR TASK");
+        }
+        return;
+    }
+
     if ((strncmp(cmd, "TASK", 4U) == 0) && (BT_IsSpace(cmd[4]) != 0U))
     {
         uint8_t question_id;
@@ -978,7 +1004,7 @@ static void BT_SendStatus(void)
 
 static void BT_SendParams(void)
 {
-    char response[768];
+    char response[1280];
     float base = 0.0f;
     float kp = 0.0f;
     float kd = 0.0f;
@@ -1003,6 +1029,16 @@ static void BT_SendParams(void)
     float laps = 0.0f;
     float left_trim = 0.0f;
     float right_trim = 0.0f;
+    float aim_line_pred_x = 0.0f;
+    float aim_line_pred_y = 0.0f;
+    float aim_turn_prefeed_x = 0.0f;
+    float aim_turn_prefeed_y = 0.0f;
+    float aim_turn_ff_x_per_deg = 0.0f;
+    float aim_turn_ff_y_per_deg = 0.0f;
+    float aim_turn_ff_gyro_x = 0.0f;
+    float aim_turn_ff_gyro_y = 0.0f;
+    float aim_turn_ff_max_step = 0.0f;
+    float aim_turn_ff_speed_sps = 0.0f;
 
     (void)Track_GetParam("BASE", &base);
     (void)Track_GetParam("KP", &kp);
@@ -1028,10 +1064,20 @@ static void BT_SendParams(void)
     (void)Track_GetParam("LAPS", &laps);
     (void)Track_GetParam("LEFT_TRIM", &left_trim);
     (void)Track_GetParam("RIGHT_TRIM", &right_trim);
+    (void)Aim_GetParam("AIM_LINE_PRED_X", &aim_line_pred_x);
+    (void)Aim_GetParam("AIM_LINE_PRED_Y", &aim_line_pred_y);
+    (void)Aim_GetParam("AIM_TURN_PREFEED_X", &aim_turn_prefeed_x);
+    (void)Aim_GetParam("AIM_TURN_PREFEED_Y", &aim_turn_prefeed_y);
+    (void)Aim_GetParam("AIM_TURN_FF_X_PER_DEG", &aim_turn_ff_x_per_deg);
+    (void)Aim_GetParam("AIM_TURN_FF_Y_PER_DEG", &aim_turn_ff_y_per_deg);
+    (void)Aim_GetParam("AIM_TURN_FF_GYRO_X", &aim_turn_ff_gyro_x);
+    (void)Aim_GetParam("AIM_TURN_FF_GYRO_Y", &aim_turn_ff_gyro_y);
+    (void)Aim_GetParam("AIM_TURN_FF_MAX_STEP", &aim_turn_ff_max_step);
+    (void)Aim_GetParam("AIM_TURN_FF_SPEED_SPS", &aim_turn_ff_speed_sps);
 
     (void)snprintf(response,
                    sizeof(response),
-                   "OK BASE=%.1f KP=%.1f KD=%.1f CENTER_BIAS=%.2f CORNER_ADVANCE_MS=%.0f TURN_OUT=%.1f TURN_IN=%.1f TURN_ANGLE=%.1f TURN_RAMP=%.1f TURN_RATE_SCALE=%.2f TURN_RATE_KP=%.4f TURN_STOP_RATE=%.1f TURN_R0=%.0f TURN_R15=%.0f TURN_R30=%.0f TURN_R45=%.0f TURN_R60=%.0f TURN_R75=%.0f TURN_R90=%.0f RECOVER_MS=%.0f MAX_TURN_MS=%.0f LAPS=%.0f LEFT_TRIM=%.3f RIGHT_TRIM=%.3f",
+                   "OK BASE=%.1f KP=%.1f KD=%.1f CENTER_BIAS=%.2f CORNER_ADVANCE_MS=%.0f TURN_OUT=%.1f TURN_IN=%.1f TURN_ANGLE=%.1f TURN_RAMP=%.1f TURN_RATE_SCALE=%.2f TURN_RATE_KP=%.4f TURN_STOP_RATE=%.1f TURN_R0=%.0f TURN_R15=%.0f TURN_R30=%.0f TURN_R45=%.0f TURN_R60=%.0f TURN_R75=%.0f TURN_R90=%.0f RECOVER_MS=%.0f MAX_TURN_MS=%.0f LAPS=%.0f LEFT_TRIM=%.3f RIGHT_TRIM=%.3f AIM_LINE_PRED_X=%.2f AIM_LINE_PRED_Y=%.2f AIM_TURN_PREFEED_X=%.1f AIM_TURN_PREFEED_Y=%.1f AIM_TURN_FF_X_PER_DEG=%.3f AIM_TURN_FF_Y_PER_DEG=%.3f AIM_TURN_FF_GYRO_X=%.3f AIM_TURN_FF_GYRO_Y=%.3f AIM_TURN_FF_MAX_STEP=%.1f AIM_TURN_FF_SPEED_SPS=%.0f",
                    base,
                    kp,
                    kd,
@@ -1055,7 +1101,17 @@ static void BT_SendParams(void)
                    max_turn_ms,
                    laps,
                    left_trim,
-                   right_trim);
+                   right_trim,
+                   aim_line_pred_x,
+                   aim_line_pred_y,
+                   aim_turn_prefeed_x,
+                   aim_turn_prefeed_y,
+                   aim_turn_ff_x_per_deg,
+                   aim_turn_ff_y_per_deg,
+                   aim_turn_ff_gyro_x,
+                   aim_turn_ff_gyro_y,
+                   aim_turn_ff_max_step,
+                   aim_turn_ff_speed_sps);
     BT_WriteLine(response);
 }
 
@@ -1065,7 +1121,8 @@ static void BT_SendSetResult(const char *name, float value)
     float actual_value = value;
 
     if ((Track_GetParam(name, &actual_value) == 0U) &&
-        (Turn_GetParam(name, &actual_value) == 0U))
+        (Turn_GetParam(name, &actual_value) == 0U) &&
+        (Aim_GetParam(name, &actual_value) == 0U))
     {
         actual_value = value;
     }
@@ -1082,6 +1139,11 @@ static uint8_t BT_SetWhitelistedParam(const char *name, float value)
     }
 
     if (Turn_SetParam(name, value) != 0U)
+    {
+        return 1U;
+    }
+
+    if (Aim_SetParam(name, value) != 0U)
     {
         return 1U;
     }
